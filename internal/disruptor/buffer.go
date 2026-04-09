@@ -5,6 +5,11 @@ import (
 	"sync/atomic"
 )
 
+// EventHandler é a interface que qualquer consumidor do Ring Buffer deve implementar.
+// Pode ser o motor de Matching, o Journaler do disco, etc.
+type EventHandler interface {
+	OnEvent(event OrderEvent, sequence uint64)
+}
 type RingBuffer struct {
 	// Array pre-alocado. As Ordens viverão aqui
 	events []OrderEvent
@@ -67,5 +72,32 @@ func (b *RingBuffer) Publish(event OrderEvent) {
 	// Usamos StoreUint64 para garantir que qualquer núcleo do processador
 	// veja essa atualização instantaneamente.
 	atomic.StoreUint64(&b.producerCursor, seq+1)
+
+}
+
+// StartConsumer inicia o loop infinito que lê as ordens do buffer Lock-Free.
+// Este método deve rodar em sua própria goroutine.
+func (b *RingBuffer) StartConsumer(handler EventHandler) {
+	// A próxima sequência que o consumidor quer ler
+	nextSequence := b.consumerCursor
+
+	for {
+		// A Barreira de Leitura
+		// O Consumidor só pode ler se o Produtor já escreveu naquela posição
+		for nextSequence >= atomic.LoadUint64(&b.producerCursor) {
+			// Busy Spinning: Espera o Produtor colocar um dado novo
+			runtime.Gosched()
+		}
+	}
+	// A Leitura
+	index := nextSequence & b.bitMask
+	event := b.events[index]
+
+	// Chama a regra de negócio (Order Book, Banco de Dados, etc)
+	handler.OnEvent(event, nextSequence)
+
+	// Avança o cursor do consumidor e publica a visibilidade para o Produtor
+	nextSequence++
+	atomic.StoreUint64(&b.consumerCursor, nextSequence)
 
 }
