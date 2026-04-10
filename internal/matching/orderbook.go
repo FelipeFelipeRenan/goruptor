@@ -99,3 +99,66 @@ func (ob *OrderBook) updateBestPrices(side Side, price uint64) {
 		}
 	}
 }
+
+func (ob *OrderBook) Process(order Order) {
+	if order.Side == Buy {
+		ob.matchBuy(order)
+	} else {
+		ob.matchSell(order)
+	}
+}
+
+func (ob *OrderBook) matchBuy(order Order) {
+
+	for order.Quantity > 0 && ob.bestAsk > 0 && order.Price >= ob.bestAsk {
+
+		bestLevel := ob.asksMap[ob.bestAsk]
+
+		element := bestLevel.Orders.Front()
+
+		for element != nil && order.Quantity > 0 {
+			restingOrder := element.Value.(Order)
+
+			var tradeQty uint64
+			if order.Quantity < restingOrder.Quantity {
+				tradeQty = order.Quantity
+			} else {
+				tradeQty = restingOrder.Quantity
+			}
+
+			// TODO: SQS em breve aqui
+
+			order.Quantity -= tradeQty
+			bestLevel.TotalVolume -= tradeQty
+
+			if restingOrder.Quantity == 0 {
+
+				next := element.Next()
+				bestLevel.Orders.Remove(next)
+				element = next
+			} else {
+				element.Value = restingOrder
+				break
+			}
+
+		}
+
+		if bestLevel.Orders.Len() == 0 {
+			delete(ob.asksMap, ob.bestAsk)
+			ob.bestAsk = ob.findNextBestAsk()
+		}
+
+	}
+
+	if order.Quantity > 0 {
+		ob.addOrder(order)
+	}
+}
+
+func (ob *OrderBook) matchSell(order Order) {
+
+}
+
+func (ob *OrderBook) findNextBestAsk() uint64 {
+
+}
