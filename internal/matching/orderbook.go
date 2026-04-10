@@ -1,6 +1,9 @@
 package matching
 
-import "container/list"
+import (
+	"container/heap"
+	"container/list"
+)
 
 // Side define a direção da ordem
 type Side uint8
@@ -34,6 +37,9 @@ type OrderBook struct {
 	bidsMap map[uint64]*PriceLevel
 	asksMap map[uint64]*PriceLevel
 
+	askPrices *MinPriceHeap
+	bidPrices *MaxPriceHeap
+
 	// Precisamos saber rapidamente qual é o topo do livro (Best Bid e Best Ask)
 	bestBid uint64
 	bestAsk uint64
@@ -41,10 +47,18 @@ type OrderBook struct {
 
 // NewOrderBook inicializa a memória do motor
 func NewOrderBook(AssetID uint32) *OrderBook {
+
+	minH := &MinPriceHeap{}
+	maxH := &MaxPriceHeap{}
+
+	heap.Init(minH)
+	heap.Init(maxH)
 	return &OrderBook{
-		AssetID: AssetID,
-		bidsMap: make(map[uint64]*PriceLevel),
-		asksMap: make(map[uint64]*PriceLevel),
+		AssetID:   AssetID,
+		bidsMap:   make(map[uint64]*PriceLevel),
+		asksMap:   make(map[uint64]*PriceLevel),
+		askPrices: minH,
+		bidPrices: maxH,
 	}
 }
 
@@ -71,6 +85,12 @@ func (ob *OrderBook) addOrder(order Order) {
 			Orders:      list.New(), // Cria uma fila (Lista Duplamente Encadeada) vazia
 		}
 		bookMap[order.Price] = level
+
+		if order.Side == Buy {
+			heap.Push(ob.bidPrices, order.Price)
+		} else {
+			heap.Push(ob.askPrices, order.Price)
+		}
 	}
 
 	// 4. Adicionamos a ordem no FINAL da fila (PushBack) respeitando a Prioridade de Tempo
@@ -100,22 +120,94 @@ func (ob *OrderBook) updateBestPrices(side Side, price uint64) {
 	}
 }
 
+// Process é a porta de entrada do Consumidor.
+// Ele decide se a ordem vai atacar o livro ou se vai descansar na fila.
 func (ob *OrderBook) Process(order Order) {
 	if order.Side == Buy {
 		ob.matchBuy(order)
 	} else {
-		ob.matchSell(order)
+		ob.matchSell(order) // A lógica de venda é o espelho da compra
 	}
 }
 
+// matchBuy é o predador de ordens de Venda (Asks).
 func (ob *OrderBook) matchBuy(order Order) {
-
+	// LOOP DE ATAQUE:
+	// 1. Eu ainda tenho quantidade para comprar?
+	// 2. Existe alguém vendendo? (bestAsk > 0)
+	// 3. O preço do vendedor é menor ou igual ao máximo que estou disposto a pagar?
 	for order.Quantity > 0 && ob.bestAsk > 0 && order.Price >= ob.bestAsk {
-
+		// Pegamos a prateleira com as ofertas mais baratas em O(1)
 		bestLevel := ob.asksMap[ob.bestAsk]
 
+		// Percorremos a fila de pessoas vendendo neste preço (Prioridade de Tempo - FIFO)
 		element := bestLevel.Orders.Front()
 
+		for element != nil && order.Quantity > 0 {
+			// Extraímos a ordem que estava descansando
+			restingOrder := element.Value.(Order)
+
+			// Calcula quanto podemos cruzar (o menor entre o que eu quero e o que ele tem)
+			var tradeQty uint64
+			if order.Quantity < restingOrder.Quantity {
+				tradeQty = order.Quantity
+			} else {
+				tradeQty = restingOrder.Quantity
+			}
+
+			// TODO: SQS em breve aqui
+
+			// Deduzimos as quantidades
+			order.Quantity -= tradeQty
+			bestLevel.TotalVolume -= tradeQty
+
+			if restingOrder.Quantity == 0 {
+				// O vendedor vendeu tudo. Removemos ele da fila e avançamos para o próximo.
+				next := element.Next()
+				bestLevel.Orders.Remove(next)
+				element = next
+			} else {
+				// O vendedor ainda tem saldo, mas a MINHA ordem zerou.
+				// Atualizamos a ordem dele na fila e paramos o ataque.
+				element.Value = restingOrder
+				break
+			}
+
+		}
+		// A prateleira de preço esvaziou? Removemos ela e subimos o preço.
+		if bestLevel.Orders.Len() == 0 {
+			delete(ob.asksMap, ob.bestAsk)
+			heap.Pop(ob.askPrices)
+
+			if ob.askPrices.Len() > 0 {
+				ob.bestAsk = (*ob.askPrices)[0]
+			} else {
+				ob.bestAsk = 0
+			}
+		}
+
+	}
+	// O ataque acabou. Se ainda sobrou quantidade na minha ordem original,
+	// significa que acabei com os vendedores baratos. Minha ordem agora vai descansar.
+	if order.Quantity > 0 {
+		ob.addOrder(order)
+	}
+}
+
+// matchSell é o predador de ordens de Compra (Bids).
+// Ele varre o livro pegando o dinheiro de quem está pagando mais caro.
+func (ob *OrderBook) matchSell(order Order) {
+	// LOOP DE ATAQUE:
+	// 1. Tenho quantidade para vender?
+	// 2. Tem alguém querendo comprar? (bestBid > 0)
+	// 3. O comprador está pagando MAIOR ou IGUAL ao mínimo que eu aceito receber?
+	for order.Quantity > 0 && ob.bestBid > 0 && order.Price <= ob.bestBid {
+
+		// Pegamos a prateleira com os compradores mais agressivos (O(1))
+		bestLevel := ob.bidsMap[ob.bestBid]
+
+		// Percorremos a fila (Prioridade de Tempo)
+		element := bestLevel.Orders.Front()
 		for element != nil && order.Quantity > 0 {
 			restingOrder := element.Value.(Order)
 
@@ -126,39 +218,39 @@ func (ob *OrderBook) matchBuy(order Order) {
 				tradeQty = restingOrder.Quantity
 			}
 
-			// TODO: SQS em breve aqui
-
+			// TODO: criar evento em breve
 			order.Quantity -= tradeQty
+			restingOrder.Quantity -= tradeQty
 			bestLevel.TotalVolume -= tradeQty
 
 			if restingOrder.Quantity == 0 {
-
 				next := element.Next()
-				bestLevel.Orders.Remove(next)
+				bestLevel.Orders.Remove(element)
 				element = next
 			} else {
 				element.Value = restingOrder
 				break
 			}
-
 		}
 
+		// A prateleira de compradores esvaziou?
 		if bestLevel.Orders.Len() == 0 {
-			delete(ob.asksMap, ob.bestAsk)
-			ob.bestAsk = ob.findNextBestAsk()
-		}
+			delete(ob.bidsMap, ob.bestBid)
 
+			// A MÁGICA DO HEAP: Pop tira o maior preço. O próximo maior sobe pro topo.
+			heap.Pop(ob.bidPrices)
+
+			if ob.bidPrices.Len() > 0 {
+				ob.bestBid = (*ob.bidPrices)[0]
+			} else {
+				ob.bestBid = 0 // Faltaram compradores no mercado
+			}
+		}
 	}
 
+	// O ataque acabou. Se eu não consegui vender tudo, a sobra da minha ordem
+	// vai para o livro de vendas descansar até alguém vir comprar.
 	if order.Quantity > 0 {
 		ob.addOrder(order)
 	}
-}
-
-func (ob *OrderBook) matchSell(order Order) {
-
-}
-
-func (ob *OrderBook) findNextBestAsk() uint64 {
-
 }
