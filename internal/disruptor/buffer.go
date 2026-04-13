@@ -5,99 +5,63 @@ import (
 	"sync/atomic"
 )
 
-// EventHandler é a interface que qualquer consumidor do Ring Buffer deve implementar.
-// Pode ser o motor de Matching, o Journaler do disco, etc.
 type EventHandler interface {
 	OnEvent(event OrderEvent, sequence uint64)
 }
+
 type RingBuffer struct {
-	// Array pre-alocado. As Ordens viverão aqui
-	events []OrderEvent
-	// usado pra calcular a posição no array de forma rapida
+	events  []OrderEvent
 	bitMask uint64
 
-	// Cache line padding (64 bytes) para evitar False Sharing
-	// Isso impede que as variáveis de cima fiquem na mesma linha de cache do Produtor
-	_ [8]uint64
-	// cursores de 64-bits que só crescem
-	// nunca serão acessados diretamente, apenas via sync/atomic
+	_              [8]uint64
 	producerCursor uint64
 
-	// Mais um padding
-	_ [8]uint64
-
+	_              [8]uint64
 	consumerCursor uint64
 	_              [8]uint64
 }
 
 func NewRingBuffer(size uint64) *RingBuffer {
-
-	// truque de bitwise pra checar se o tamanho é uma potencia de 2
-	if size == 0 || (size&(size-1)) != 0 {
-		panic("The size of the Ring Buffer must be a power of 2")
-	}
-
 	return &RingBuffer{
-		events:         make([]OrderEvent, size), // aloca tudo de uma vez
-		bitMask:        size - 1,
-		producerCursor: 0,
-		consumerCursor: 0,
+		events:  make([]OrderEvent, size),
+		bitMask: size - 1,
 	}
 }
 
-// Publish recebe uma nova ordem e injeta no Ring Buffer usando concorrência Lock-Free.
 func (b *RingBuffer) Publish(event OrderEvent) {
-	// 1. Pegamos o cursor atual do Produtor.
-	// Como só tem 1 goroutine publicando, não precisamos ler isso atomicamente.
-	seq := b.producerCursor
+	// 1. Produtor olha onde ele está
+	seq := atomic.LoadUint64(&b.producerCursor)
 
-	// 2. A Barreira (Slow Consumer Check)
-	// Calculamos qual é a "volta completa" no buffer.
-	// Se a sequência atual menos o cursor do consumidor for maior ou igual ao
-	// tamanho do buffer, significa que o produtor alcançou o consumidor.
-	// Não podemos sobrescrever dados que não foram lidos!
+	// 2. Barreira: Espera se o tambor estiver cheio
 	for seq-atomic.LoadUint64(&b.consumerCursor) >= uint64(len(b.events)) {
-		// Busy Spinning: Cede o controle da CPU temporariamente para outras
-		// goroutines (como o consumidor) trabalharem, em vez de travar (lock).
 		runtime.Gosched()
 	}
 
-	// 3. A Gravação
-	// Calculamos o índice exato usando a nossa máscara de bits super rápida.
-	index := seq & b.bitMask
-	b.events[index] = event
+	// 3. Coloca a bala na câmara
+	b.events[seq&b.bitMask] = event
 
-	// 4. O Commit (Visibilidade de Memória)
-	// Só AGORA, depois que o dado está gravado na RAM, nós avançamos o cursor.
-	// Usamos StoreUint64 para garantir que qualquer núcleo do processador
-	// veja essa atualização instantaneamente.
+	// 4. Gira o tambor (Avisa todos os núcleos da CPU que a ordem está lá)
 	atomic.StoreUint64(&b.producerCursor, seq+1)
-
 }
 
-// StartConsumer inicia o loop infinito que lê as ordens do buffer Lock-Free.
-// Este método deve rodar em sua própria goroutine.
 func (b *RingBuffer) StartConsumer(handler EventHandler) {
-	// A próxima sequência que o consumidor quer ler
-	nextSequence := b.consumerCursor
+	var nextSequence uint64 = 0
 
+	// Loop Infinito do Consumidor
 	for {
-		// A Barreira de Leitura
-		// O Consumidor só pode ler se o Produtor já escreveu naquela posição
+		// 1. Barreira: Espera a Mão (Produtor) colocar uma bala nova
 		for nextSequence >= atomic.LoadUint64(&b.producerCursor) {
-			// Busy Spinning: Espera o Produtor colocar um dado novo
-			runtime.Gosched()
+			runtime.Gosched() // Pausa de 1 nanosegundo
 		}
+
+		// 2. Pega a bala da câmara
+		event := b.events[nextSequence&b.bitMask]
+
+		// 3. Dispara a Regra de Negócio (O nosso Motor de Matching)
+		handler.OnEvent(event, nextSequence)
+
+		// 4. Prepara para a próxima bala e avisa que essa já foi disparada
+		nextSequence++
+		atomic.StoreUint64(&b.consumerCursor, nextSequence)
 	}
-	// A Leitura
-	index := nextSequence & b.bitMask
-	event := b.events[index]
-
-	// Chama a regra de negócio (Order Book, Banco de Dados, etc)
-	handler.OnEvent(event, nextSequence)
-
-	// Avança o cursor do consumidor e publica a visibilidade para o Produtor
-	nextSequence++
-	atomic.StoreUint64(&b.consumerCursor, nextSequence)
-
 }
