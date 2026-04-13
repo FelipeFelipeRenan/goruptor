@@ -39,7 +39,6 @@ func NewAWSPublisher() (*AWSPublisher, error) {
 		config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
 			return aws.Credentials{AccessKeyID: "test", SecretAccessKey: "test"}, nil
 		})),
-
 	)
 	if err != nil {
 		return nil, err
