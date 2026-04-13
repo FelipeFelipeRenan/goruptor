@@ -133,21 +133,14 @@ func (ob *OrderBook) Process(order Order) {
 // matchBuy é o predador de ordens de Venda (Asks).
 func (ob *OrderBook) matchBuy(order Order) {
 	// LOOP DE ATAQUE:
-	// 1. Eu ainda tenho quantidade para comprar?
-	// 2. Existe alguém vendendo? (bestAsk > 0)
-	// 3. O preço do vendedor é menor ou igual ao máximo que estou disposto a pagar?
 	for order.Quantity > 0 && ob.bestAsk > 0 && order.Price >= ob.bestAsk {
-		// Pegamos a prateleira com as ofertas mais baratas em O(1)
-		bestLevel := ob.asksMap[ob.bestAsk]
 
-		// Percorremos a fila de pessoas vendendo neste preço (Prioridade de Tempo - FIFO)
+		bestLevel := ob.asksMap[ob.bestAsk]
 		element := bestLevel.Orders.Front()
 
 		for element != nil && order.Quantity > 0 {
-			// Extraímos a ordem que estava descansando
 			restingOrder := element.Value.(Order)
 
-			// Calcula quanto podemos cruzar (o menor entre o que eu quero e o que ele tem)
 			var tradeQty uint64
 			if order.Quantity < restingOrder.Quantity {
 				tradeQty = order.Quantity
@@ -155,40 +148,37 @@ func (ob *OrderBook) matchBuy(order Order) {
 				tradeQty = restingOrder.Quantity
 			}
 
-			// TODO: SQS em breve aqui
-
 			// Deduzimos as quantidades
 			order.Quantity -= tradeQty
+			restingOrder.Quantity -= tradeQty
 			bestLevel.TotalVolume -= tradeQty
 
+			// Removemos ou atualizamos a ordem do vendedor
 			if restingOrder.Quantity == 0 {
-				// O vendedor vendeu tudo. Removemos ele da fila e avançamos para o próximo.
 				next := element.Next()
-				bestLevel.Orders.Remove(next)
+				bestLevel.Orders.Remove(element)
 				element = next
 			} else {
-				// O vendedor ainda tem saldo, mas a MINHA ordem zerou.
-				// Atualizamos a ordem dele na fila e paramos o ataque.
 				element.Value = restingOrder
 				break
 			}
-
 		}
-		// A prateleira de preço esvaziou? Removemos ela e subimos o preço.
+
+		// A prateleira de preço esvaziou? Removemos do mapa E da árvore.
 		if bestLevel.Orders.Len() == 0 {
 			delete(ob.asksMap, ob.bestAsk)
-			heap.Pop(ob.askPrices)
+			heap.Pop(ob.askPrices) // Remove o menor preço do topo da árvore
 
+			// A própria árvore já fez o próximo menor subir para a posição [0]
 			if ob.askPrices.Len() > 0 {
-				ob.bestAsk = (*ob.askPrices)[0]
+				ob.bestAsk = (*ob.askPrices)[0] // Pega o novo bestAsk instantaneamente!
 			} else {
-				ob.bestAsk = 0
+				ob.bestAsk = 0 // Livro de vendas ficou 100% vazio
 			}
 		}
-
 	}
-	// O ataque acabou. Se ainda sobrou quantidade na minha ordem original,
-	// significa que acabei com os vendedores baratos. Minha ordem agora vai descansar.
+
+	// O ataque acabou. Se ainda sobrou quantidade, a ordem vai descansar.
 	if order.Quantity > 0 {
 		ob.addOrder(order)
 	}
