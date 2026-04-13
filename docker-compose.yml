@@ -1,0 +1,13 @@
+services:
+  ministack:
+    image: nahuelnucera/ministack:latest
+    container_name: goruptor-aws-cloud
+    ports:
+      - "4566:4566" # A porta mágica única que responde por todos os serviços
+    environment:
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - MINISTACK_ACCOUNT_ID=000000000000
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
