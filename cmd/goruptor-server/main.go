@@ -2,54 +2,43 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"time"
 
+	"github.com/FelipeFelipeRenan/goruptor/internal/cloud"
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
 	"github.com/FelipeFelipeRenan/goruptor/internal/matching"
 )
 
 func main() {
-	fmt.Println("🚀 Iniciando a Corretora Pulse...")
+	fmt.Println("🚀 Iniciando a Corretora Goruptor...")
 
-	// 1. Instanciamos o Motor de Matching para o par BTC/USD (Asset 1)
-	book := matching.NewOrderBook(1)
+	// 1. Conecta com a AWS (MiniStack)
+	awsPub, err := cloud.NewAWSPublisher()
+	if err != nil {
+		log.Fatalf("Falha ao conectar na AWS: %v", err)
+	}
 
-	// 2. Instanciamos o Adaptador do Motor
+	// 2. Liga o Worker Assíncrono em background
+	go awsPub.Publish()
+	fmt.Println("☁️  Worker AWS Conectado no SQS local.")
+
+	// 3. Instancia o Motor passando o AWS Publisher
+	book := matching.NewOrderBook(1, awsPub)
 	engineHandler := matching.NewEngineHandler(book)
-
-	// 3. Instanciamos o Chassi Lock-Free (Tambor de 1024 posições)
 	ringBuffer := disruptor.NewRingBuffer(1024)
 
-	// 4. LIGAMOS O MOTOR (O Consumidor começa a girar em background)
+	// LIGAMOS O MOTOR
 	go ringBuffer.StartConsumer(engineHandler)
 
-	fmt.Println("✅ Motor LMAX Disruptor rodando. Aguardando ordens...")
-	time.Sleep(1 * time.Second) // Pausa dramática
+	fmt.Println("✅ Motor LMAX Disruptor rodando. Aguardando ordens...\n--- 🔔 PREGÃO ABERTO ---")
 
-	// 5. SIMULANDO O GATEWAY DE REDE (O Produtor)
-	// Vamos jogar aquelas mesmas ordens do nosso teste, mas agora
-	// passando pelo funil de alta performance!
+	// Mandando as ordens
+	ringBuffer.Publish(disruptor.OrderEvent{OrderID: 1, Price: 65000, Quantity: 10, Side: disruptor.Sell})
+	ringBuffer.Publish(disruptor.OrderEvent{OrderID: 2, Price: 65100, Quantity: 5, Side: disruptor.Sell})
+	time.Sleep(10 * time.Millisecond)
+	ringBuffer.Publish(disruptor.OrderEvent{OrderID: 3, Price: 65000, Quantity: 12, Side: disruptor.Buy})
 
-	fmt.Println("\n--- 🔔 PREGÃO ABERTO ---")
-
-	// Vendedor 1 chega
-	ringBuffer.Publish(disruptor.OrderEvent{
-		OrderID: 1, AccountID: 100, Price: 65000, Quantity: 10, AssetID: 1, Side: disruptor.Sell,
-	})
-
-	// Vendedor 2 chega (mais caro)
-	ringBuffer.Publish(disruptor.OrderEvent{
-		OrderID: 2, AccountID: 101, Price: 65100, Quantity: 5, AssetID: 1, Side: disruptor.Sell,
-	})
-
-	time.Sleep(10 * time.Millisecond) // Dá tempo pro console imprimir na ordem certa
-
-	// O Predador ataca! (Você comprando)
-	ringBuffer.Publish(disruptor.OrderEvent{
-		OrderID: 3, AccountID: 999, Price: 65000, Quantity: 12, AssetID: 1, Side: disruptor.Buy,
-	})
-
-	// Seguramos o programa aberto por 1 segundo para vermos os prints
 	time.Sleep(1 * time.Second)
 	fmt.Println("--- 🛑 PREGÃO ENCERRADO ---")
 }

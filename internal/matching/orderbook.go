@@ -3,6 +3,8 @@ package matching
 import (
 	"container/heap"
 	"container/list"
+
+	"github.com/FelipeFelipeRenan/goruptor/internal/cloud"
 )
 
 // Side define a direção da ordem
@@ -43,10 +45,12 @@ type OrderBook struct {
 	// Precisamos saber rapidamente qual é o topo do livro (Best Bid e Best Ask)
 	bestBid uint64
 	bestAsk uint64
+
+	cloudPublisher *cloud.AWSPublisher
 }
 
 // NewOrderBook inicializa a memória do motor
-func NewOrderBook(AssetID uint32) *OrderBook {
+func NewOrderBook(AssetID uint32, publisher *cloud.AWSPublisher) *OrderBook {
 
 	minH := &MinPriceHeap{}
 	maxH := &MaxPriceHeap{}
@@ -54,11 +58,12 @@ func NewOrderBook(AssetID uint32) *OrderBook {
 	heap.Init(minH)
 	heap.Init(maxH)
 	return &OrderBook{
-		AssetID:   AssetID,
-		bidsMap:   make(map[uint64]*PriceLevel),
-		asksMap:   make(map[uint64]*PriceLevel),
-		askPrices: minH,
-		bidPrices: maxH,
+		AssetID:        AssetID,
+		bidsMap:        make(map[uint64]*PriceLevel),
+		asksMap:        make(map[uint64]*PriceLevel),
+		askPrices:      minH,
+		bidPrices:      maxH,
+		cloudPublisher: publisher,
 	}
 }
 
@@ -148,6 +153,12 @@ func (ob *OrderBook) matchBuy(order Order) {
 				tradeQty = restingOrder.Quantity
 			}
 
+			if ob.cloudPublisher != nil {
+				ob.cloudPublisher.TradeCh <- cloud.TradeEvent{
+					Price:    ob.bestAsk,
+					Quantity: tradeQty,
+				}
+			}
 			// Deduzimos as quantidades
 			order.Quantity -= tradeQty
 			restingOrder.Quantity -= tradeQty
@@ -208,7 +219,12 @@ func (ob *OrderBook) matchSell(order Order) {
 				tradeQty = restingOrder.Quantity
 			}
 
-			// TODO: criar evento em breve
+			if ob.cloudPublisher != nil {
+				ob.cloudPublisher.TradeCh <- cloud.TradeEvent{
+					Price:    ob.bestAsk,
+					Quantity: tradeQty,
+				}
+			}
 			order.Quantity -= tradeQty
 			restingOrder.Quantity -= tradeQty
 			bestLevel.TotalVolume -= tradeQty

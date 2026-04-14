@@ -1,4 +1,4 @@
-package main
+package cloud
 
 import (
 	"context"
@@ -20,6 +20,7 @@ type TradeEvent struct {
 type AWSPublisher struct {
 	client   *sqs.Client
 	queueURL string
+	TradeCh  chan TradeEvent
 }
 
 func NewAWSPublisher() (*AWSPublisher, error) {
@@ -49,20 +50,24 @@ func NewAWSPublisher() (*AWSPublisher, error) {
 	return &AWSPublisher{
 		client:   sqs.NewFromConfig(cfg),
 		queueURL: queueURL,
+		TradeCh:  make(chan TradeEvent, 10000),
 	}, nil
 }
 
-func (p *AWSPublisher) Publish(trade TradeEvent) {
-	body, _ := json.Marshal(trade)
+func (p *AWSPublisher) Publish() {
+	for trade := range p.TradeCh {
 
-	_, err := p.client.SendMessage(context.TODO(), &sqs.SendMessageInput{
-		QueueUrl:    &p.queueURL,
-		MessageBody: aws.String(string(body)),
-	})
+		body, _ := json.Marshal(trade)
 
-	if err != nil {
-		fmt.Println("❌ Erro SQS:", err)
-	} else {
-		fmt.Printf("☁️ [AWS SQS] Trade publicado: %d BTC a $%d fechados!\n", trade.Quantity, trade.Price)
+		_, err := p.client.SendMessage(context.TODO(), &sqs.SendMessageInput{
+			QueueUrl:    &p.queueURL,
+			MessageBody: aws.String(string(body)),
+		})
+
+		if err != nil {
+			fmt.Println("❌ Erro SQS:", err)
+		} else {
+			fmt.Printf("☁️ [AWS SQS] Trade publicado: %d BTC a $%d fechados!\n", trade.Quantity, trade.Price)
+		}
 	}
 }
