@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 	"log"
-	"time"
 
+	"github.com/FelipeFelipeRenan/goruptor/internal/api"
 	"github.com/FelipeFelipeRenan/goruptor/internal/cloud"
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
 	"github.com/FelipeFelipeRenan/goruptor/internal/matching"
@@ -33,12 +33,10 @@ func main() {
 
 	fmt.Println("✅ Motor LMAX Disruptor rodando. Aguardando ordens...\n--- 🔔 PREGÃO ABERTO ---")
 
-	// Mandando as ordens
-	ringBuffer.Publish(disruptor.OrderEvent{OrderID: 1, Price: 65000, Quantity: 10, Side: disruptor.Sell})
-	ringBuffer.Publish(disruptor.OrderEvent{OrderID: 2, Price: 65100, Quantity: 5, Side: disruptor.Sell})
-	time.Sleep(10 * time.Millisecond)
-	ringBuffer.Publish(disruptor.OrderEvent{OrderID: 3, Price: 65000, Quantity: 12, Side: disruptor.Buy})
+	server := api.NewServer(ringBuffer)
 
-	time.Sleep(1 * time.Second)
-	fmt.Println("--- 🛑 PREGÃO ENCERRADO ---")
+	err = server.Start(":3000")
+	if err != nil {
+		return
+	}
 }
