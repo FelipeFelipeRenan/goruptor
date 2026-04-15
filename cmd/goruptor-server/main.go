@@ -33,7 +33,7 @@ func main() {
 
 	fmt.Println("✅ Motor LMAX Disruptor rodando. Aguardando ordens...\n--- 🔔 PREGÃO ABERTO ---")
 
-	server := api.NewServer(ringBuffer)
+	server := api.NewServer(ringBuffer, book)
 
 	err = server.Start(":3000")
 	if err != nil {
