@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Goruptor Exchange</title>
+    <style>
+        body { background-color: #0b0e11; color: #eaecef; font-family: monospace; display: flex; justify-content: center; padding: 50px; }
+        .orderbook { width: 400px; background: #181a20; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #2b3139; }
+        .row span { width: 33%; text-align: right; }
+        .row span:first-child { text-align: left; }
+        .ask .price { color: #f6465d; }
+        .bid .price { color: #0ecb81; }
+        .header { color: #848e9c; font-weight: bold; font-size: 12px; margin-bottom: 10px;}
+        .spread { text-align: center; font-size: 18px; font-weight: bold; margin: 20px 0; border-top: 1px solid #2b3139; border-bottom: 1px solid #2b3139; padding: 10px 0;}
+    </style>
+</head>
+<body>
+
+<div class="orderbook">
+    <h2>Goruptor BTC/USD</h2>
+    <div class="row header">
+        <span>Preço ($)</span>
+        <span>Qtd (BTC)</span>
+        <span>Total ($)</span>
+    </div>
+
+    <div id="asks"></div>
+
+    <div class="spread" id="spread">Aguardando ordens...</div>
+
+    <div id="bids"></div>
+</div>
+
+<script>
+    const ws = new WebSocket('ws://localhost:3000/ws');
+
+    ws.onmessage = function(event) {
+        const data = JSON.parse(event.data);
+
+        let asksHtml = '';
+        // Inverte o loop dos Asks para o menor preço ficar perto do centro
+        for (let i = data.asks.length - 1; i >= 0; i--) {
+            const ask = data.asks[i];
+            asksHtml += `<div class="row ask"><span class="price">${ask.price.toLocaleString()}</span><span>${ask.quantity}</span><span>${(ask.price * ask.quantity).toLocaleString()}</span></div>`;
+        }
+        document.getElementById('asks').innerHTML = asksHtml;
+
+        let bidsHtml = '';
+        for (const bid of data.bids) {
+            bidsHtml += `<div class="row bid"><span class="price">${bid.price.toLocaleString()}</span><span>${bid.quantity}</span><span>${(bid.price * bid.quantity).toLocaleString()}</span></div>`;
+        }
+        document.getElementById('bids').innerHTML = bidsHtml;
+
+        if (data.asks.length > 0 && data.bids.length > 0) {
+            const spread = data.asks[0].price - data.bids[0].price;
+            document.getElementById('spread').innerHTML = `Spread: $${spread}`;
+        }
+    };
+</script>
+</body>
+</html>

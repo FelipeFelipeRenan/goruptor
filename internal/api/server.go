@@ -2,8 +2,12 @@ package api
 
 import (
 	"log"
+	"sync"
+	"time"
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
+	"github.com/FelipeFelipeRenan/goruptor/internal/matching"
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -17,9 +21,13 @@ type OrderRequest struct {
 type Server struct {
 	app        *fiber.App
 	ringBuffer *disruptor.RingBuffer
+	orderBook  *matching.OrderBook
+
+	clients map[*websocket.Conn]bool
+	mu      sync.Mutex
 }
 
-func NewServer(rb *disruptor.RingBuffer) *Server {
+func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook) *Server {
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 	})
@@ -27,9 +35,23 @@ func NewServer(rb *disruptor.RingBuffer) *Server {
 	server := &Server{
 		app:        app,
 		ringBuffer: rb,
+		orderBook:  ob,
+		clients:    make(map[*websocket.Conn]bool),
 	}
 
 	app.Post("/api/orders", server.handleCreateOrder)
+
+	app.Use("/ws", func(ctx *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(ctx) {
+			ctx.Locals("allowed", true)
+			return ctx.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+
+	app.Get("/ws", websocket.New(server.handleWS))
+
+	go server.broadcastTicker()
 	return server
 }
 
@@ -67,4 +89,42 @@ func (s Server) handleCreateOrder(ctx *fiber.Ctx) error {
 		"message":  "Ordem recebida e enviada para o motor",
 		"order_id": req.OrderID,
 	})
+}
+
+func (s *Server) handleWS(ctx *websocket.Conn) {
+	s.mu.Lock()
+	s.clients[ctx] = true
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		delete(s.clients, ctx)
+		s.mu.Unlock()
+		err := ctx.Close()
+		if err != nil {
+			return
+		}
+	}()
+
+	for {
+		if _, _, err := ctx.ReadMessage(); err != nil {
+			break
+		}
+	}
+}
+
+func (s *Server) broadcastTicker() {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	for range ticker.C {
+		snap := s.orderBook.GetSnapshot()
+
+		s.mu.Lock()
+		for client := range s.clients {
+			if err := client.WriteJSON(snap); err != nil {
+				client.Close()
+				delete(s.clients, client)
+			}
+		}
+		s.mu.Unlock()
+	}
 }

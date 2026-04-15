@@ -3,6 +3,7 @@ package matching
 import (
 	"container/heap"
 	"container/list"
+	"sort"
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/cloud"
 )
@@ -29,6 +30,16 @@ type PriceLevel struct {
 	Price       uint64
 	TotalVolume uint64     // Soma rápida de todas as quantidades aqui
 	Orders      *list.List // Fila (FIFO) usando linked list nativa do Go
+}
+
+type OrderSnapshot struct {
+	Price    uint64 `json:"price"`
+	Quantity uint64 `json:"quantity"`
+}
+
+type BookSnapshot struct {
+	Asks []OrderSnapshot `json:"asks"`
+	Bids []OrderSnapshot `json:"bids"`
 }
 
 // OrderBook é a arena onde Bids e Asks se encontram
@@ -259,4 +270,37 @@ func (ob *OrderBook) matchSell(order Order) {
 	if order.Quantity > 0 {
 		ob.addOrder(order)
 	}
+}
+
+func (ob *OrderBook) GetSnapshot() BookSnapshot {
+	snap := BookSnapshot{
+		Asks: make([]OrderSnapshot, 0),
+		Bids: make([]OrderSnapshot, 0),
+	}
+
+	askPrices := make([]uint64, 0, len(ob.asksMap))
+	for price := range ob.asksMap {
+		askPrices = append(askPrices, price)
+	}
+
+	sort.Slice(askPrices, func(i, j int) bool { return askPrices[i] < askPrices[j] })
+
+	for i := 0; i < len(askPrices) && i < 10; i++ {
+		price := askPrices[i]
+		snap.Asks = append(snap.Asks, OrderSnapshot{Price: price, Quantity: ob.asksMap[price].TotalVolume})
+	}
+
+	bidPrices := make([]uint64, 0, len(ob.bidsMap))
+	for price := range ob.bidsMap {
+		bidPrices = append(bidPrices, price)
+	}
+	sort.Slice(bidPrices, func(i, j int) bool { return bidPrices[i] > bidPrices[j] })
+
+	for i := 0; i < len(bidPrices) && i < 10; i++ {
+		price := bidPrices[i]
+		snap.Bids = append(snap.Bids, OrderSnapshot{Price: price, Quantity: ob.bidsMap[price].TotalVolume})
+	}
+
+	return snap
+
 }
