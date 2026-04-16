@@ -2,11 +2,13 @@ package matching
 
 import (
 	"testing"
+
+	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
 )
 
 func TestOrderBook_MatchingLogic(t *testing.T) {
 	// 1. Inicializamos o motor para o ativo 1 (BTC/USD)
-	ob := NewOrderBook(1)
+	ob := NewOrderBook(1, nil)
 
 	// 2. Criamos as ordens dos Vendedores (Asks)
 	sell1 := Order{ID: 1, Side: Sell, Price: 65000, Quantity: 10}
@@ -55,4 +57,49 @@ func TestOrderBook_MatchingLogic(t *testing.T) {
 
 	// Se chegou até aqui sem erros, o teste passou!
 	t.Log("Todos os cruzamentos, parciais e atualizações de Heap funcionaram perfeitamente!")
+}
+
+func TestOrderBook_PartialFill(t *testing.T) {
+	// 1. O Isolamento: Iniciamos o Livro sem a AWS (passamos 'nil')
+	// Não queremos que o teste unitário dependa da internet ou do Docker!
+	ob := NewOrderBook(1, nil)
+
+	// 2. O Cenário: Entra um Vendedor oferecendo 8 BTC a $65.000
+	sellOrder := Order{
+		ID:       1,
+		Quantity: 8,
+		Price:    65000,
+		Side:     Side(disruptor.Sell),
+	}
+	ob.Process(sellOrder)
+
+	// Validação de Sanidade: O vendedor realmente foi pra prateleira?
+	if ob.asksMap[65000] == nil || ob.asksMap[65000].TotalVolume != 8 {
+		t.Fatalf("❌ Erro: O vendedor não foi colocado na prateleira corretamente.")
+	}
+
+	// 3. O Ataque: Entra um Comprador querendo 10 BTC a $65.000
+	buyOrder := Order{
+		ID:       2,
+		Quantity: 10,
+		Price:    65000,
+		Side:     Side(disruptor.Buy),
+	}
+	ob.Process(buyOrder)
+
+	// 4. A Prova Matemática (As Asserções)
+
+	// Regra A: O Vendedor foi totalmente consumido? A prateleira dele tem que estar vazia.
+	if ob.asksMap[65000] != nil && ob.asksMap[65000].TotalVolume > 0 {
+		t.Errorf("❌ Erro: A ordem de venda de 8 BTC deveria ter sido totalmente consumida!")
+	}
+
+	// Regra B: O Comprador recebeu o troco? Ele tem que estar descansando com 2 BTC.
+	if ob.bidsMap[65000] == nil {
+		t.Fatalf("❌ Erro: A prateleira de compras sumiu com o troco do cliente!")
+	}
+
+	if ob.bidsMap[65000].TotalVolume != 2 {
+		t.Errorf("❌ Erro de Partial Fill: Esperava 2 BTC sobrando, mas o motor registrou %d BTC", ob.bidsMap[65000].TotalVolume)
+	}
 }

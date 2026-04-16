@@ -6,6 +6,8 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.14
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.25
+	github.com/gofiber/contrib/websocket v1.3.4
+	github.com/gofiber/fiber/v2 v2.52.12
 )
 
 require (
@@ -23,8 +25,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.10 // indirect
 	github.com/aws/smithy-go v1.24.2 // indirect
 	github.com/fasthttp/websocket v1.5.8 // indirect
-	github.com/gofiber/contrib/websocket v1.3.4 // indirect
-	github.com/gofiber/fiber/v2 v2.52.12 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
