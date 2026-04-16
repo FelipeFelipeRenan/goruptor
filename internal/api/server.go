@@ -7,6 +7,7 @@ import (
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
 	"github.com/FelipeFelipeRenan/goruptor/internal/matching"
+	"github.com/FelipeFelipeRenan/goruptor/internal/storage"
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 )
@@ -22,12 +23,13 @@ type Server struct {
 	app        *fiber.App
 	ringBuffer *disruptor.RingBuffer
 	orderBook  *matching.OrderBook
+	wal        *storage.WAL
 
 	clients map[*websocket.Conn]bool
 	mu      sync.Mutex
 }
 
-func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook) *Server {
+func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, wal *storage.WAL) *Server {
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 	})
@@ -36,6 +38,7 @@ func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook) *Server {
 		app:        app,
 		ringBuffer: rb,
 		orderBook:  ob,
+		wal:        wal,
 		clients:    make(map[*websocket.Conn]bool),
 	}
 
@@ -78,13 +81,13 @@ func (s Server) handleCreateOrder(ctx *fiber.Ctx) error {
 		side = disruptor.Buy
 	}
 
-	s.ringBuffer.Publish(disruptor.OrderEvent{
-		OrderID:  req.OrderID,
-		Price:    req.Price,
-		Quantity: req.Quantity,
-		Side:     side,
-	})
+	event := disruptor.OrderEvent{
+		OrderID: req.OrderID, Price: req.Price, Quantity: req.Quantity, Side: side,
+	}
+	s.wal.Log(event)
 
+	s.ringBuffer.Publish(event)
+	
 	return ctx.Status(202).JSON(fiber.Map{
 		"message":  "Ordem recebida e enviada para o motor",
 		"order_id": req.OrderID,
