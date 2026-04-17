@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"container/list"
 	"sort"
+	"sync"
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/cloud"
 )
@@ -49,6 +50,8 @@ type OrderBook struct {
 	// Mapas para achar o nível de preço em O(1)
 	bidsMap map[uint64]*PriceLevel
 	asksMap map[uint64]*PriceLevel
+
+	mu sync.RWMutex
 
 	askPrices *MinPriceHeap
 	bidPrices *MaxPriceHeap
@@ -139,6 +142,8 @@ func (ob *OrderBook) updateBestPrices(side Side, price uint64) {
 // Process é a porta de entrada do Consumidor.
 // Ele decide se a ordem vai atacar o livro ou se vai descansar na fila.
 func (ob *OrderBook) Process(order Order) {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
 	if order.Side == Buy {
 		ob.matchBuy(order)
 	} else {
@@ -273,6 +278,8 @@ func (ob *OrderBook) matchSell(order Order) {
 }
 
 func (ob *OrderBook) GetSnapshot() BookSnapshot {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
 	snap := BookSnapshot{
 		Asks: make([]OrderSnapshot, 0),
 		Bids: make([]OrderSnapshot, 0),
