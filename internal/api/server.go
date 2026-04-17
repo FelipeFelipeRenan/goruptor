@@ -24,12 +24,13 @@ type Server struct {
 	ringBuffer *disruptor.RingBuffer
 	orderBook  *matching.OrderBook
 	batcher    *storage.Batcher
+	wal        *storage.WAL
 
 	clients map[*websocket.Conn]bool
 	mu      sync.Mutex
 }
 
-func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, batcher *storage.Batcher) *Server {
+func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, wal *storage.WAL, batcher *storage.Batcher) *Server {
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 	})
@@ -39,6 +40,7 @@ func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, batcher *storag
 		ringBuffer: rb,
 		orderBook:  ob,
 		batcher:    batcher,
+		wal:        wal,
 		clients:    make(map[*websocket.Conn]bool),
 	}
 
@@ -58,7 +60,7 @@ func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, batcher *storag
 	return server
 }
 
-func (s Server) Start(port string) error {
+func (s *Server) Start(port string) error {
 	log.Printf("🌐 API da Goruptor rodando na porta %s...\n", port)
 	err := s.app.Listen(port)
 	if err != nil {
@@ -67,7 +69,7 @@ func (s Server) Start(port string) error {
 	return nil
 }
 
-func (s Server) handleCreateOrder(ctx *fiber.Ctx) error {
+func (s *Server) handleCreateOrder(ctx *fiber.Ctx) error {
 	var req OrderRequest
 	if err := ctx.BodyParser(&req); err != nil {
 		return ctx.Status(400).JSON(fiber.Map{"error": "JSON inválido"})
@@ -81,12 +83,12 @@ func (s Server) handleCreateOrder(ctx *fiber.Ctx) error {
 		side = disruptor.Buy
 	}
 
-	s.ringBuffer.Publish(disruptor.OrderEvent{
-		OrderID:  req.OrderID,
-		Price:    req.Price,
-		Quantity: req.Quantity,
-		Side:     side,
-	})
+	event := disruptor.OrderEvent{
+		OrderID: req.OrderID, Price: req.Price, Quantity: req.Quantity, Side: side,
+	}
+	s.wal.Log(event)
+
+	s.ringBuffer.Publish(event)
 
 	return ctx.Status(202).JSON(fiber.Map{
 		"message":  "Ordem recebida e enviada para o motor",
@@ -124,7 +126,10 @@ func (s *Server) broadcastTicker() {
 		s.mu.Lock()
 		for client := range s.clients {
 			if err := client.WriteJSON(snap); err != nil {
-				client.Close()
+				err := client.Close()
+				if err != nil {
+					return
+				}
 				delete(s.clients, client)
 			}
 		}
