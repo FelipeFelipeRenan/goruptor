@@ -7,6 +7,7 @@ import (
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
 	"github.com/FelipeFelipeRenan/goruptor/internal/matching"
+	"github.com/FelipeFelipeRenan/goruptor/internal/storage"
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 )
@@ -22,12 +23,13 @@ type Server struct {
 	app        *fiber.App
 	ringBuffer *disruptor.RingBuffer
 	orderBook  *matching.OrderBook
+	batcher    *storage.Batcher
 
 	clients map[*websocket.Conn]bool
 	mu      sync.Mutex
 }
 
-func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook) *Server {
+func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, batcher *storage.Batcher) *Server {
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 	})
@@ -36,6 +38,7 @@ func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook) *Server {
 		app:        app,
 		ringBuffer: rb,
 		orderBook:  ob,
+		batcher:    batcher,
 		clients:    make(map[*websocket.Conn]bool),
 	}
 
