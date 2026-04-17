@@ -8,6 +8,7 @@ import (
 	"github.com/FelipeFelipeRenan/goruptor/internal/cloud"
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
 	"github.com/FelipeFelipeRenan/goruptor/internal/matching"
+	"github.com/FelipeFelipeRenan/goruptor/internal/storage"
 )
 
 func main() {
@@ -23,6 +24,12 @@ func main() {
 	go awsPub.Publish()
 	fmt.Println("☁️  Worker AWS Conectado no SQS local.")
 
+	rdsConnStr := "postgres://goruptor:admin123@localhost:4566/exchange?sslmode=disable"
+
+	batcher, err := storage.NewBatcher(rdsConnStr, 1000)
+	if err != nil {
+		log.Fatalf("Falha ao conectar no RDS da AWS: %v", err)
+	}
 	// 3. Instancia o Motor passando o AWS Publisher
 	book := matching.NewOrderBook(1, awsPub)
 	engineHandler := matching.NewEngineHandler(book)
@@ -33,7 +40,7 @@ func main() {
 
 	fmt.Println("✅ Motor LMAX Disruptor rodando. Aguardando ordens...\n--- 🔔 PREGÃO ABERTO ---")
 
-	server := api.NewServer(ringBuffer, book)
+	server := api.NewServer(ringBuffer, book, batcher)
 
 	err = server.Start(":3000")
 	if err != nil {
