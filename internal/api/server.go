@@ -27,7 +27,8 @@ type Server struct {
 	wal        *storage.WAL
 
 	clients map[*websocket.Conn]bool
-	mu      sync.Mutex
+	
+	mu sync.Mutex
 }
 
 func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, wal *storage.WAL, batcher *storage.Batcher) *Server {
@@ -44,7 +45,13 @@ func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, wal *storage.WA
 		clients:    make(map[*websocket.Conn]bool),
 	}
 
+	app.Get("/", func(c *fiber.Ctx) error {
+		return c.SendFile("./index.html")
+	})
+
 	app.Post("/api/orders", server.handleCreateOrder)
+
+	app.Get("/api/candles", server.handleGetCandles)
 
 	app.Use("/ws", func(ctx *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(ctx) {

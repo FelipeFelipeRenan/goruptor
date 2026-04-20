@@ -12,7 +12,7 @@ import (
 )
 
 type Batcher struct {
-	db        *sql.DB
+	DB        *sql.DB
 	orderCh   chan disruptor.OrderEvent
 	batch     []disruptor.OrderEvent
 	batchSize int
@@ -25,7 +25,7 @@ func NewBatcher(connStr string, batchSize int) (*Batcher, error) {
 	}
 
 	b := &Batcher{
-		db:        db,
+		DB:        db,
 		orderCh:   make(chan disruptor.OrderEvent, 50000),
 		batch:     make([]disruptor.OrderEvent, 0, batchSize),
 		batchSize: batchSize,
@@ -82,7 +82,7 @@ func (b *Batcher) flush() {
 	stmt := fmt.Sprintf("INSERT INTO trade_history (order_id, price, quantity, side) VALUES %s ON CONFLICT DO NOTHING",
 		strings.Join(valueStrings, ","))
 
-	_, err := b.db.Exec(stmt, valueArgs...)
+	_, err := b.DB.Exec(stmt, valueArgs...)
 	if err != nil {
 		log.Printf("❌ Erro no Bulk Insert do RDS: %v", err)
 	} else {
