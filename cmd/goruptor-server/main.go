@@ -53,7 +53,7 @@ func main() {
 
 	book.SetRestoreMode(false)
 	fmt.Printf("✅ Memória restaurada com sucesso! (%d ordens recuperadas)\n", len(pastEvents))
-	rdsConnStr := "postgres://goruptor:admin123@localhost:4510/exchange?sslmode=disable"
+	rdsConnStr := "postgres://goruptor:admin123@localhost:15432/exchange?sslmode=disable"
 
 	// 2. Instancia o Trabalhador que vai fazer o Bulk Insert de 1000 em 1000 ordens
 	batcher, err := storage.NewBatcher(rdsConnStr, 1000)

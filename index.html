@@ -4,42 +4,113 @@
     <meta charset="UTF-8">
     <title>Goruptor Exchange</title>
     <style>
-        body { background-color: #0b0e11; color: #eaecef; font-family: monospace; display: flex; justify-content: center; padding: 50px; }
-        .orderbook { width: 400px; background: #181a20; border-radius: 8px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
-        .row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #2b3139; }
-        .row span { width: 33%; text-align: right; }
-        .row span:first-child { text-align: left; }
-        .ask .price { color: #f6465d; }
-        .bid .price { color: #0ecb81; }
-        .header { color: #848e9c; font-weight: bold; font-size: 12px; margin-bottom: 10px;}
-        .spread { text-align: center; font-size: 18px; font-weight: bold; margin: 20px 0; border-top: 1px solid #2b3139; border-bottom: 1px solid #2b3139; padding: 10px 0;}
+        body {
+            background-color: #0b0e11;
+            color: #eaecef;
+            font-family: monospace;
+            padding: 50px;
+            margin: 0;
+        }
+
+        /* Container principal para alinhar Livro e Gráfico lado a lado */
+        .dashboard {
+            display: flex;
+            justify-content: center;
+            gap: 40px; /* Espaço entre o livro e o gráfico */
+            align-items: flex-start;
+        }
+
+        .orderbook {
+            width: 400px;
+            background: #181a20;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid #2b3139;
+        }
+
+        .row span {
+            width: 33%;
+            text-align: right;
+        }
+
+        .row span:first-child {
+            text-align: left;
+        }
+
+        .ask .price {
+            color: #f6465d;
+        }
+
+        .bid .price {
+            color: #0ecb81;
+        }
+
+        .header {
+            color: #848e9c;
+            font-weight: bold;
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+
+        .spread {
+            text-align: center;
+            font-size: 18px;
+            font-weight: bold;
+            margin: 20px 0;
+            border-top: 1px solid #2b3139;
+            border-bottom: 1px solid #2b3139;
+            padding: 10px 0;
+        }
+
+        .chart-wrapper {
+            background: #181a20;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
     </style>
+
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 
-<div class="orderbook">
-    <h2>Goruptor BTC/USD</h2>
-    <div class="row header">
-        <span>Preço ($)</span>
-        <span>Qtd (BTC)</span>
-        <span>Total ($)</span>
+<div class="dashboard">
+    <div class="orderbook">
+        <h2>Goruptor BTC/USD</h2>
+        <div class="row header">
+            <span>Preço ($)</span>
+            <span>Qtd (BTC)</span>
+            <span>Total ($)</span>
+        </div>
+
+        <div id="asks"></div>
+        <div class="spread" id="spread">Aguardando ordens...</div>
+        <div id="bids"></div>
     </div>
 
-    <div id="asks"></div>
+    <div class="chart-wrapper">
+        <h2 style="margin-top: 0;">Gráfico de 1 Minuto</h2>
+        <div id="chart-container" style="width: 800px; height: 450px;"></div>
 
-    <div class="spread" id="spread">Aguardando ordens...</div>
-
-    <div id="bids"></div>
+        <div hx-get="/api/candles" hx-trigger="every 5s" hx-swap="none"></div>
+    </div>
 </div>
 
 <script>
     const ws = new WebSocket('ws://localhost:3000/ws');
 
-    ws.onmessage = function(event) {
+    ws.onmessage = function (event) {
         const data = JSON.parse(event.data);
 
         let asksHtml = '';
-        // Inverte o loop dos Asks para o menor preço ficar perto do centro
         for (let i = data.asks.length - 1; i >= 0; i--) {
             const ask = data.asks[i];
             asksHtml += `<div class="row ask"><span class="price">${ask.price.toLocaleString()}</span><span>${ask.quantity}</span><span>${(ask.price * ask.quantity).toLocaleString()}</span></div>`;
@@ -58,5 +129,33 @@
         }
     };
 </script>
+
+<script>
+    // Executa apenas quando a tela carregar completamente
+    document.addEventListener("DOMContentLoaded", function () {
+
+        // Inicializa o Gráfico do TradingView
+        const chart = LightweightCharts.createChart(document.getElementById('chart-container'), {
+            layout: {background: {type: 'solid', color: '#181a20'}, textColor: '#848e9c'},
+            grid: {vertLines: {color: '#2b3139'}, horzLines: {color: '#2b3139'}},
+            timeScale: {timeVisible: true, secondsVisible: false},
+        });
+
+        // Cria as Velas
+        const candleSeries = chart.addCandlestickSeries({
+            upColor: '#0ecb81', downColor: '#f6465d', borderVisible: false,
+            wickUpColor: '#0ecb81', wickDownColor: '#f6465d'
+        });
+
+        // Ouve o evento do HTMX disparado pelo Go via Header
+        document.body.addEventListener("updateChart", function (evt) {
+            const candles = evt.detail; // Array JSON
+            if (candles && candles.length > 0) {
+                candleSeries.setData(candles);
+            }
+        });
+    });
+</script>
+
 </body>
-</html>
+</html>     
