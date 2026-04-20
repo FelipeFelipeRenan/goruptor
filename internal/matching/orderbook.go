@@ -61,6 +61,8 @@ type OrderBook struct {
 	bestAsk uint64
 
 	cloudPublisher *cloud.AWSPublisher
+
+	isRestoring bool
 }
 
 // NewOrderBook inicializa a memória do motor
@@ -169,7 +171,7 @@ func (ob *OrderBook) matchBuy(order Order) {
 				tradeQty = restingOrder.Quantity
 			}
 
-			if ob.cloudPublisher != nil {
+			if !ob.isRestoring && ob.cloudPublisher != nil {
 				ob.cloudPublisher.TradeCh <- cloud.TradeEvent{
 					Price:    ob.bestAsk,
 					Quantity: tradeQty,
@@ -235,9 +237,9 @@ func (ob *OrderBook) matchSell(order Order) {
 				tradeQty = restingOrder.Quantity
 			}
 
-			if ob.cloudPublisher != nil {
+			if !ob.isRestoring && ob.cloudPublisher != nil {
 				ob.cloudPublisher.TradeCh <- cloud.TradeEvent{
-					Price:    ob.bestAsk,
+					Price:    ob.bestBid,
 					Quantity: tradeQty,
 				}
 			}
@@ -310,4 +312,10 @@ func (ob *OrderBook) GetSnapshot() BookSnapshot {
 
 	return snap
 
+}
+
+func (ob *OrderBook) SetRestoreMode(restoring bool) {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	ob.isRestoring = restoring
 }

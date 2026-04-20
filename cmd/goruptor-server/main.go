@@ -40,6 +40,7 @@ func main() {
 		log.Fatalf("Erro ao ler o WAL: %v", err)
 	}
 
+	book.SetRestoreMode(true)
 	for _, evt := range pastEvents {
 		// Reprocessa silenciosamente no Cérebro (não vai pro SQS de novo)
 		book.Process(matching.Order{
@@ -49,6 +50,8 @@ func main() {
 			Side:     matching.Side(evt.Side),
 		})
 	}
+
+	book.SetRestoreMode(false)
 	fmt.Printf("✅ Memória restaurada com sucesso! (%d ordens recuperadas)\n", len(pastEvents))
 	rdsConnStr := "postgres://goruptor:admin123@localhost:4510/exchange?sslmode=disable"
 
