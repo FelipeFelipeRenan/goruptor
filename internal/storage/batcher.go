@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
+	_ "github.com/lib/pq"
 )
 
 type Batcher struct {
