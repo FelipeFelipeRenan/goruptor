@@ -19,6 +19,7 @@ provider "aws" {
 
   endpoints {
     sqs = "http://localhost:4566"
+    rds = "http://localhost:4566"
   }
 }
 
