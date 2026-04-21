@@ -24,6 +24,20 @@ func NewBatcher(connStr string, batchSize int) (*Batcher, error) {
 		return nil, err
 	}
 
+	query := `
+    CREATE TABLE IF NOT EXISTS trade_history (
+        order_id BIGINT PRIMARY KEY,
+        price BIGINT NOT NULL,
+        quantity BIGINT NOT NULL,
+        side VARCHAR(10) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );`
+
+	_, err = db.Exec(query)
+	if err != nil {
+		log.Fatalf("❌ Erro fatal ao criar a tabela no banco: %v", err)
+	}
+
 	b := &Batcher{
 		DB:        db,
 		orderCh:   make(chan disruptor.OrderEvent, 50000),
