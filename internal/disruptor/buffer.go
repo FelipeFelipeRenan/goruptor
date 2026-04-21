@@ -1,8 +1,8 @@
 package disruptor
 
 import (
-	"runtime"
 	"sync/atomic"
+	"time"
 )
 
 type EventHandler interface {
@@ -34,7 +34,7 @@ func (b *RingBuffer) Publish(event OrderEvent) {
 
 	// 2. Barreira: Espera se o tambor estiver cheio
 	for seq-atomic.LoadUint64(&b.consumerCursor) >= uint64(len(b.events)) {
-		runtime.Gosched()
+		time.Sleep(time.Millisecond)
 	}
 
 	// 3. Coloca a bala na câmara
@@ -51,7 +51,7 @@ func (b *RingBuffer) StartConsumer(handler EventHandler) {
 	for {
 		// 1. Barreira: Espera a Mão (Produtor) colocar uma bala nova
 		for nextSequence >= atomic.LoadUint64(&b.producerCursor) {
-			runtime.Gosched() // Pausa de 1 nanosegundo
+			time.Sleep(time.Millisecond)
 		}
 
 		// 2. Pega a bala da câmara

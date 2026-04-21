@@ -27,7 +27,7 @@ func main() {
 	// 3. Instancia o Motor passando o AWS Publisher
 	book := matching.NewOrderBook(1, awsPub)
 	engineHandler := matching.NewEngineHandler(book)
-	ringBuffer := disruptor.NewRingBuffer(1024) // 2. INICIA O WRITE-AHEAD LOG (WAL)
+	ringBuffer := disruptor.NewRingBuffer(131072) // 2. INICIA O WRITE-AHEAD LOG (WAL)
 	wal, err := storage.NewWAL("goruptor_journal.jsonl")
 	if err != nil {
 		log.Fatalf("Falha ao iniciar o WAL: %v", err)
