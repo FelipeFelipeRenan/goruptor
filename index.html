@@ -149,8 +149,10 @@
 
         // Ouve o evento do HTMX disparado pelo Go via Header
         document.body.addEventListener("updateChart", function (evt) {
-            const candles = evt.detail; // Array JSON
+            const candles = evt.detail.candles; // 👈 AGORA PEGAMOS A CHAVE CORRETA!
+
             if (candles && candles.length > 0) {
+                console.log("Velas que o Go mandou:", candles); // Pra ver a mágica no console do Chrome
                 candleSeries.setData(candles);
             }
         });

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 
 	"github.com/gofiber/fiber/v2"
@@ -53,8 +54,14 @@ func (s *Server) handleGetCandles(c *fiber.Ctx) error {
 	if len(candles) == 0 {
 		return c.SendStatus(200)
 	}
+	fmt.Println(candles)
 
-	jsonData, _ := json.Marshal(candles)
+	// Envelopamos o Array dentro de um objeto pra blindar contra o parser do HTMX
+	response := map[string]interface{}{
+		"candles": candles,
+	}
+	jsonData, _ := json.Marshal(response)
+
 	c.Set("HX-Trigger", `{"updateChart": `+string(jsonData)+`}`)
 	return c.SendStatus(200)
 }

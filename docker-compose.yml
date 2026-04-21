@@ -3,7 +3,7 @@ services:
     image: nahuelnucera/ministack:latest
     container_name: goruptor-aws-cloud
     ports:
-      - "4566:4566" # A porta mágica única que responde por todos os serviços
+      - "4566:4566"
     environment:
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test

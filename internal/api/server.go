@@ -97,6 +97,8 @@ func (s *Server) handleCreateOrder(ctx *fiber.Ctx) error {
 
 	s.ringBuffer.Publish(event)
 
+	s.batcher.Push(event)
+
 	return ctx.Status(202).JSON(fiber.Map{
 		"message":  "Ordem recebida e enviada para o motor",
 		"order_id": req.OrderID,
