@@ -1,6 +1,7 @@
 package disruptor
 
 import (
+	"runtime"
 	"sync/atomic"
 	"time"
 )
@@ -51,7 +52,7 @@ func (b *RingBuffer) StartConsumer(handler EventHandler) {
 	for {
 		// 1. Barreira: Espera a Mão (Produtor) colocar uma bala nova
 		for nextSequence >= atomic.LoadUint64(&b.producerCursor) {
-			time.Sleep(time.Millisecond)
+			runtime.Gosched() // Muito mais rápido e amigável com a CPU
 		}
 
 		// 2. Pega a bala da câmara

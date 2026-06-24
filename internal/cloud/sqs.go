@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -53,21 +55,36 @@ func NewAWSPublisher() (*AWSPublisher, error) {
 		TradeCh:  make(chan TradeEvent, 10000),
 	}, nil
 }
-
 func (p *AWSPublisher) Publish() {
-	for trade := range p.TradeCh {
+	const numWorkers = 50 // Pode aumentar dependendo do throughput suportado pelo SQS/MiniStack
+	var wg sync.WaitGroup
 
-		body, _ := json.Marshal(trade)
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
 
-		_, err := p.client.SendMessage(context.TODO(), &sqs.SendMessageInput{
-			QueueUrl:    &p.queueURL,
-			MessageBody: aws.String(string(body)),
-		})
+			for trade := range p.TradeCh {
+				body, _ := json.Marshal(trade)
 
-		if err != nil {
-			fmt.Println("❌ Erro SQS:", err)
-		} else {
-			fmt.Printf("☁️ [AWS SQS] Trade publicado: %d BTC a $%d fechados!\n", trade.Quantity, trade.Price)
-		}
+				// 1. Criamos um contexto que expira em 2 segundos
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+
+				// 2. Passamos o contexto protegido para o SDK da AWS
+				_, err := p.client.SendMessage(ctx, &sqs.SendMessageInput{
+					QueueUrl:    &p.queueURL,
+					MessageBody: aws.String(string(body)),
+				})
+
+				cancel() // Liberta os recursos do timer
+
+				if err != nil {
+					// Se der erro (ex: Timeout), o worker NÃO FICA PRESO. Ele reporta e segue.
+					fmt.Printf("❌ [Worker %d] Erro/Timeout na AWS: %v\n", workerID, err)
+				}
+			}
+		}(i)
 	}
+
+	wg.Wait()
 }

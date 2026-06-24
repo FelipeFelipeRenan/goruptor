@@ -1,4 +1,4 @@
-# Variáveis
+	# Variáveis
 BINARY_NAME=goruptor-server
 MAIN_PATH=cmd/goruptor-server/main.go
 WAL_FILE=goruptor_journal.jsonl
