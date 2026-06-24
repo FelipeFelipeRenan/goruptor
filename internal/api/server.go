@@ -10,6 +10,8 @@ import (
 	"github.com/FelipeFelipeRenan/goruptor/internal/storage"
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/pprof"
+
 )
 
 type OrderRequest struct {
@@ -35,6 +37,8 @@ func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, wal *storage.WA
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 	})
+
+	app.Use(pprof.New())
 
 	server := &Server{
 		app:        app,

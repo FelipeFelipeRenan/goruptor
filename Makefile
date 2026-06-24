@@ -3,7 +3,7 @@ BINARY_NAME=goruptor-server
 MAIN_PATH=cmd/goruptor-server/main.go
 WAL_FILE=goruptor_journal.jsonl
 
-.PHONY: all setup up down infra run test clean cannon-sell cannon-buy help
+.PHONY: all setup up down infra run test clean cannon-sell cannon-buy cannon-peak-buy cannon-peak-sell cannon-peak help
 
 help: ## Exibe esta ajuda
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -48,3 +48,20 @@ cannon-sell: ## Dispara 5000 ordens de VENDA usando o seu Cannon (Rust)
 
 cannon-buy: ## Dispara 5000 ordens de COMPRA usando o seu Cannon (Rust)
 	cannon -u http://localhost:3000/api/orders -c 10000 -w 20 -X POST -H "Content-Type: application/json" --body '{"order_id": {{number}}, "price": {{number}}, "quantity": 1, "side": "BUY"}'
+
+
+cannon-peak-buy:
+	@echo "🔥 Iniciando PEAK TEST: 100.000 ordens de COMPRA (150 workers)..."
+	cannon -u http://localhost:3000/api/orders -c 100000 -w 150 -X POST \
+		-H "Connection: keep-alive" \
+		-H "Content-Type: application/json" \
+		--body '{"order_id": {{number}}, "price": {{number}}, "quantity": 1, "side": "BUY"}'
+
+cannon-peak-sell:
+	@echo "🔥 Iniciando PEAK TEST: 100.000 ordens de VENDA (150 workers)..."
+	cannon -u http://localhost:3000/api/orders -c 100000 -w 150 -X POST \
+		-H "Connection: keep-alive" \
+		-H "Content-Type: application/json" \
+		--body '{"order_id": {{number}}, "price": {{number}}, "quantity": 1, "side": "SELL"}'
+
+cannon-peak: cannon-peak-buy cannon-peak-sell

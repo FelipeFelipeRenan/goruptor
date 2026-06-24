@@ -2,8 +2,8 @@ package disruptor
 
 import (
 	"runtime"
+	"sync"
 	"sync/atomic"
-	"time"
 )
 
 type EventHandler interface {
@@ -14,6 +14,7 @@ type RingBuffer struct {
 	events  []OrderEvent
 	bitMask uint64
 
+	mu             sync.Mutex
 	_              [8]uint64
 	producerCursor uint64
 
@@ -30,21 +31,25 @@ func NewRingBuffer(size uint64) *RingBuffer {
 }
 
 func (b *RingBuffer) Publish(event OrderEvent) {
-	// 1. Produtor olha onde ele está
-	seq := atomic.LoadUint64(&b.producerCursor)
+	b.mu.Lock() // 2. Ninguém entra ao mesmo tempo
 
-	// 2. Barreira: Espera se o tambor estiver cheio
+	seq := b.producerCursor // 3. Leitura limpa e segura
+
+	// 4. Barreira: Espera se o tambor estiver cheio
 	for seq-atomic.LoadUint64(&b.consumerCursor) >= uint64(len(b.events)) {
-		time.Sleep(time.Millisecond)
+		b.mu.Unlock()     // Liberta a fila enquanto espera
+		runtime.Gosched() // Cede a CPU
+		b.mu.Lock()       // Tranca de novo para verificar
+		seq = b.producerCursor
 	}
 
-	// 3. Coloca a bala na câmara
 	b.events[seq&b.bitMask] = event
 
-	// 4. Gira o tambor (Avisa todos os núcleos da CPU que a ordem está lá)
+	
 	atomic.StoreUint64(&b.producerCursor, seq+1)
-}
 
+	b.mu.Unlock() // 5. Liberta o próximo produtor
+}
 func (b *RingBuffer) StartConsumer(handler EventHandler) {
 	var nextSequence uint64 = 0
 

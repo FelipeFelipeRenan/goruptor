@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/api"
 	"github.com/FelipeFelipeRenan/goruptor/internal/cloud"
@@ -64,11 +67,32 @@ func main() {
 	go ringBuffer.StartConsumer(engineHandler)
 
 	fmt.Println("✅ Motor LMAX Disruptor rodando. Aguardando ordens...\n--- 🔔 PREGÃO ABERTO ---")
+	httpServer := api.NewServer(ringBuffer, book, wal, batcher)
+	go func() {
+		if err := httpServer.Start(":3000"); err != nil {
+			log.Fatalf("Erro no servidor HTTP: %v", err)
+		}
+	}()
 
-	server := api.NewServer(ringBuffer, book, wal, batcher)
+	tcpServer := api.NewTCPServer(ringBuffer, wal, batcher)
+	go func() {
+		if err := tcpServer.Start(":3001"); err != nil {
+			log.Fatalf("Erro no servidor TCP: %v", err)
+		}
+	}()
 
-	err = server.Start(":3000")
-	if err != nil {
-		return
-	}
+	// --- A FORMA CORRETA E NATIVA DE BLOQUEAR A MAIN ---
+
+	// Cria o canal para receber os sinais do OS
+	quit := make(chan os.Signal, 1)
+
+	// Notifica o canal 'quit' caso receba um SIGINT (Ctrl+C) ou SIGTERM (Docker stop)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	fmt.Println("🟢 Servidores a rodar em background. Pressione Ctrl+C para sair.")
+
+	// A main bloqueia aqui eternamente até que um sinal entre no canal
+	<-quit
+
+	fmt.Println("\n🛑 Sinal recebido! Desligando os motores da Goruptor...")
 }
