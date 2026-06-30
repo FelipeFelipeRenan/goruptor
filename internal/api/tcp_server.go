@@ -45,47 +45,53 @@ func (s *TCPServer) Start(port string) error {
 		go s.handleConnection(conn)
 	}
 }
-
 func (s *TCPServer) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	log.Println("👀 Nova conexão TCP recebida do Cannon!") // LOG 1
-
-	// 1. Instancia o leitor com buffer para lidar com as quebras de linha
 	reader := bufio.NewReader(conn)
 
 	for {
-		// 2. Lê a string até encontrar o delimitador (Enter/Quebra de linha)
 		line, err := reader.ReadString('\n')
-		log.Printf("📦 Lemos da rede: %q (Erro: %v)\n", line, err) // LOG 2
 		if err != nil {
-			if err != io.EOF {
-				log.Printf("Erro na leitura TCP: %v\n", err)
+			if err != io.EOF && !strings.Contains(err.Error(), "connection reset") {
+				log.Printf("❌ Erro de leitura crítica no socket: %v\n", err)
 			}
-			return // Sai quando o Cannon fechar a conexão
+			return // Encerra a goroutine graciosamente quando o cliente desconectar
 		}
 
-		// 3. Limpa espaços e quebras de linha e divide pela vírgula
+		// 1. Sanetização radical da string: remove espaços, quebras reais e literais (\\n)
 		line = strings.TrimSpace(line)
-		parts := strings.Split(line, ",")
+		line = strings.ReplaceAll(line, "\\n", "")
 
-		// Prevenção de pânico se o Cannon enviar uma linha em branco ou cortada
-		if len(parts) != 4 {
+		if line == "" {
 			continue
 		}
 
-		// 4. Mapeia o lado da ordem (B = Buy, S = Sell)
+		parts := strings.Split(line, ",")
+		if len(parts) != 4 {
+			log.Printf("⚠️ Pacote malformado rejeitado: %q\n", line)
+			continue
+		}
+
+		// 2. Mapeamento seguro do Side
 		side := disruptor.Buy
 		if parts[0] == "S" {
 			side = disruptor.Sell
 		}
 
-		// 5. Converte as strings para uint64 (Base 10, 64 bits)
-		orderID, _ := strconv.ParseUint(parts[1], 10, 64)
-		price, _ := strconv.ParseUint(parts[2], 10, 64)
-		quantity, _ := strconv.ParseUint(parts[3], 10, 64)
+		// 3. Parsing com tratamento de erro explícito (Fim do '_' oculto)
+		orderID, errID := strconv.ParseUint(strings.TrimSpace(parts[1]), 10, 64)
+		price, errPrice := strconv.ParseUint(strings.TrimSpace(parts[2]), 10, 64)
+		quantity, errQty := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
 
-		// 6. Monta o evento e joga pro motor
+		// Se qualquer um falhar, o pacote é descartado com aviso no log
+		if errID != nil || errPrice != nil || errQty != nil {
+			log.Printf("⚠️ Erro ao converter dados numéricos na linha: %q (ID_err: %v, Price_err: %v, Qty_err: %v)\n", 
+				line, errID, errPrice, errQty)
+			continue
+		}
+
+		// 4. Montagem e despacho para o ecossistema LMAX
 		event := disruptor.OrderEvent{
 			OrderID:  orderID,
 			Price:    price,
@@ -97,9 +103,10 @@ func (s *TCPServer) handleConnection(conn net.Conn) {
 		s.ringBuffer.Publish(event)
 		s.batcher.Push(event)
 
+		// Confirmação para o Cannon computar o sucesso
 		_, err = conn.Write([]byte("1\n"))
 		if err != nil {
-			return // Se o Cannon fechou a porta na nossa cara, morremos graciosamente
+			return
 		}
 	}
 }
