@@ -3,7 +3,7 @@ BINARY_NAME=goruptor-server
 MAIN_PATH=cmd/goruptor-server/main.go
 WAL_FILE=goruptor_journal.jsonl
 
-.PHONY: all setup up down infra run test clean cannon-sell cannon-buy cannon-peak-buy cannon-peak-sell cannon-peak help
+.PHONY: all setup up down infra run test clean nuke cannon-sell cannon-buy cannon-peak-buy cannon-peak-sell cannon-peak help cannon-dma-peak cannon-dma-sell cannon-dma-buy cannon-dma-peak
 
 help: ## Exibe esta ajuda
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -65,3 +65,16 @@ cannon-peak-sell:
 		--body '{"order_id": {{number}}, "price": {{number}}, "quantity": 1, "side": "SELL"}'
 
 cannon-peak: cannon-peak-buy cannon-peak-sell
+
+
+cannon-dma-buy: ## Dispara 100k ordens de COMPRA via TCP binário
+	@echo "🔥 Disparando 100k ordens de COMPRA (DMA Lane :3001)..."
+	cannon -u 127.0.0.1:3001 --mode tcp -c 100000 -w 150 \
+	  --body 'B,{{number}},{{number}},1'
+
+cannon-dma-sell: ## Dispara 100k ordens de VENDA via TCP binário
+	@echo "📉 Disparando 100k ordens de VENDA (DMA Lane :3001)..."
+	cannon -u 127.0.0.1:3001 --mode tcp -c 100000 -w 150 \
+	  --body 'S,{{number}},{{number}},1'
+
+cannon-dma-peak: cannon-dma-sell cannon-dma-buy

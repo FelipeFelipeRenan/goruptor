@@ -1,10 +1,12 @@
 package api
 
 import (
-	"encoding/binary"
+	"bufio"
 	"io"
 	"log"
 	"net"
+	"strconv"
+	"strings"
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
 	"github.com/FelipeFelipeRenan/goruptor/internal/storage"
@@ -45,32 +47,59 @@ func (s *TCPServer) Start(port string) error {
 }
 
 func (s *TCPServer) handleConnection(conn net.Conn) {
-    defer conn.Close()
-    
-    // Buffer local para evitar alocação por cada pacote
-    buf := make([]byte, 25)
+	defer conn.Close()
 
-    for {
-        // io.ReadFull é bloqueante. Ele só retorna se ler 25 bytes ou der erro.
-        _, err := io.ReadFull(conn, buf)
-        if err != nil {
-            if err != io.EOF {
-                log.Printf("❌ Erro na leitura do socket DMA: %v", err)
-            }
-            return // Sai da goroutine quando a conexão for fechada pelo Sniper
-        }
+	log.Println("👀 Nova conexão TCP recebida do Cannon!") // LOG 1
 
-        // Conversão zero-copy (na stack)
-        event := disruptor.OrderEvent{
-            OrderID:  binary.BigEndian.Uint64(buf[0:8]),
-            Price:    binary.BigEndian.Uint64(buf[8:16]),
-            Quantity: binary.BigEndian.Uint64(buf[16:24]),
-            Side:     disruptor.Side(buf[24]),
-        }
+	// 1. Instancia o leitor com buffer para lidar com as quebras de linha
+	reader := bufio.NewReader(conn)
 
-        // Envia para o motor
-        s.wal.Log(event)
-        s.ringBuffer.Publish(event)
-        s.batcher.Push(event)
-    }
+	for {
+		// 2. Lê a string até encontrar o delimitador (Enter/Quebra de linha)
+		line, err := reader.ReadString('\n')
+		log.Printf("📦 Lemos da rede: %q (Erro: %v)\n", line, err) // LOG 2
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("Erro na leitura TCP: %v\n", err)
+			}
+			return // Sai quando o Cannon fechar a conexão
+		}
+
+		// 3. Limpa espaços e quebras de linha e divide pela vírgula
+		line = strings.TrimSpace(line)
+		parts := strings.Split(line, ",")
+
+		// Prevenção de pânico se o Cannon enviar uma linha em branco ou cortada
+		if len(parts) != 4 {
+			continue
+		}
+
+		// 4. Mapeia o lado da ordem (B = Buy, S = Sell)
+		side := disruptor.Buy
+		if parts[0] == "S" {
+			side = disruptor.Sell
+		}
+
+		// 5. Converte as strings para uint64 (Base 10, 64 bits)
+		orderID, _ := strconv.ParseUint(parts[1], 10, 64)
+		price, _ := strconv.ParseUint(parts[2], 10, 64)
+		quantity, _ := strconv.ParseUint(parts[3], 10, 64)
+
+		// 6. Monta o evento e joga pro motor
+		event := disruptor.OrderEvent{
+			OrderID:  orderID,
+			Price:    price,
+			Quantity: quantity,
+			Side:     side,
+		}
+
+		s.wal.Log(event)
+		s.ringBuffer.Publish(event)
+		s.batcher.Push(event)
+
+		_, err = conn.Write([]byte("1\n"))
+		if err != nil {
+			return // Se o Cannon fechou a porta na nossa cara, morremos graciosamente
+		}
+	}
 }
