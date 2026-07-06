@@ -1,18 +1,15 @@
 package api
 
 import (
-	"bufio"
+	"encoding/binary"
 	"io"
 	"log"
 	"net"
-	"strconv"
 	"strings"
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
 	"github.com/FelipeFelipeRenan/goruptor/internal/storage"
 )
-
-const packetSize = 25
 
 type TCPServer struct {
 	ringBuffer *disruptor.RingBuffer
@@ -33,7 +30,7 @@ func (s *TCPServer) Start(port string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("⚡ DMA (Direct Market Access) Lane rodando puro em TCP na porta %s...\n", port)
+	log.Printf("⚡ DMA (Direct Market Access) Lane rodando puro em TCP Binário na porta %s...\n", port)
 
 	for {
 		conn, err := listener.Accept()
@@ -41,70 +38,46 @@ func (s *TCPServer) Start(port string) error {
 			log.Printf("Erro TCP: %v\n", err)
 			continue
 		}
-		// Cada cliente que conecta (ex: workers do seu Cannon) ganha uma goroutine ultra-leve
 		go s.handleConnection(conn)
 	}
 }
+
 func (s *TCPServer) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	reader := bufio.NewReader(conn)
+
+	buf := make([]byte, 25)
+	
+	// Pré-alocamos o byte de resposta (ACK) para evitar alocação no loop
+	ack := []byte{1}
 
 	for {
-		line, err := reader.ReadString('\n')
+		// 2. Leitura Binária Bloqueante
+		// Só avança quando tiver pescado exatamente 25 bytes da placa de rede.
+		_, err := io.ReadFull(conn, buf)
 		if err != nil {
 			if err != io.EOF && !strings.Contains(err.Error(), "connection reset") {
-				log.Printf("❌ Erro de leitura crítica no socket: %v\n", err)
+				log.Printf("❌ Fim da conexão ou erro na leitura do socket: %v\n", err)
 			}
-			return // Encerra a goroutine graciosamente quando o cliente desconectar
+			return
 		}
 
-		// 1. Sanetização radical da string: remove espaços, quebras reais e literais (\\n)
-		line = strings.TrimSpace(line)
-		line = strings.ReplaceAll(line, "\\n", "")
-
-		if line == "" {
-			continue
-		}
-
-		parts := strings.Split(line, ",")
-		if len(parts) != 4 {
-			log.Printf("⚠️ Pacote malformado rejeitado: %q\n", line)
-			continue
-		}
-
-		// 2. Mapeamento seguro do Side
-		side := disruptor.Buy
-		if parts[0] == "S" {
-			side = disruptor.Sell
-		}
-
-		// 3. Parsing com tratamento de erro explícito (Fim do '_' oculto)
-		orderID, errID := strconv.ParseUint(strings.TrimSpace(parts[1]), 10, 64)
-		price, errPrice := strconv.ParseUint(strings.TrimSpace(parts[2]), 10, 64)
-		quantity, errQty := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
-
-		// Se qualquer um falhar, o pacote é descartado com aviso no log
-		if errID != nil || errPrice != nil || errQty != nil {
-			log.Printf("⚠️ Erro ao converter dados numéricos na linha: %q (ID_err: %v, Price_err: %v, Qty_err: %v)\n", 
-				line, errID, errPrice, errQty)
-			continue
-		}
-
-		// 4. Montagem e despacho para o ecossistema LMAX
+		// 3. Deserialização via Bit Shifting (Extremamente rápido)
 		event := disruptor.OrderEvent{
-			OrderID:  orderID,
-			Price:    price,
-			Quantity: quantity,
-			Side:     side,
+			OrderID:  binary.BigEndian.Uint64(buf[0:8]),
+			Price:    binary.BigEndian.Uint64(buf[8:16]),
+			Quantity: binary.BigEndian.Uint64(buf[16:24]),
+			Side:     disruptor.Side(buf[24]),
 		}
 
+		// 4. Despacho Lock-Free para o Motor
 		s.wal.Log(event)
 		s.ringBuffer.Publish(event)
 		s.batcher.Push(event)
 
-		// Confirmação para o Cannon computar o sucesso
-		_, err = conn.Write([]byte("1\n"))
+		// 5. ACK Binário
+		// Enviamos 1 único byte de volta para o Cannon confirmar o sucesso
+		_, err = conn.Write(ack)
 		if err != nil {
 			return
 		}

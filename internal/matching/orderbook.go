@@ -172,9 +172,18 @@ func (ob *OrderBook) matchBuy(order Order) {
 			}
 
 			if !ob.isRestoring && ob.cloudPublisher != nil {
-				ob.cloudPublisher.TradeCh <- cloud.TradeEvent{
+				trade := cloud.TradeEvent{
 					Price:    ob.bestAsk,
 					Quantity: tradeQty,
+				}
+				// Envio Não-Bloqueante!
+				select {
+				case ob.cloudPublisher.TradeCh <- trade:
+					// Sucesso: Fila SQS tem espaço
+				default:
+					// Fila Cheia: A AWS está muito lenta!
+					// Descartamos silenciosamente para o Motor não travar.
+					// Num sistema real, usaríamos um Disruptor secundário para as métricas.
 				}
 			}
 			// Deduzimos as quantidades
@@ -238,9 +247,16 @@ func (ob *OrderBook) matchSell(order Order) {
 			}
 
 			if !ob.isRestoring && ob.cloudPublisher != nil {
-				ob.cloudPublisher.TradeCh <- cloud.TradeEvent{
+				trade := cloud.TradeEvent{
 					Price:    ob.bestBid,
 					Quantity: tradeQty,
+				}
+				// Envio Não-Bloqueante!
+				select {
+				case ob.cloudPublisher.TradeCh <- trade:
+					// Sucesso: Fila SQS tem espaço
+				default:
+					// Fila Cheia! Motor continua a rodar.
 				}
 			}
 			order.Quantity -= tradeQty

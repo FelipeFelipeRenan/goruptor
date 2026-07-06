@@ -81,9 +81,7 @@ func main() {
 		}
 	}()
 
-	// --- A FORMA CORRETA E NATIVA DE BLOQUEAR A MAIN ---
 
-	// Cria o canal para receber os sinais do OS
 	quit := make(chan os.Signal, 1)
 
 	// Notifica o canal 'quit' caso receba um SIGINT (Ctrl+C) ou SIGTERM (Docker stop)
