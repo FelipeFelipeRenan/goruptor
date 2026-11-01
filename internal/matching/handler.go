@@ -1,12 +1,16 @@
 package matching
 
 import (
-	"fmt"
-
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
 )
 
 // EngineHandler é o "Cão" do revólver. Ele escuta o Ring Buffer e aciona o Motor.
+//
+// OnEvent roda na única goroutine consumidora, no caminho crítico de TODAS as
+// ordens. Por isso não deve fazer I/O (print, log, rede, disco): um único
+// fmt.Printf por ordem custava ~1 µs e limitava o motor a uma fração do que o
+// order book aguenta. Observabilidade deve sair por contadores atômicos ou por
+// um canal não bloqueante consumido fora daqui.
 type EngineHandler struct {
 	orderBook *OrderBook
 }
@@ -18,25 +22,13 @@ func NewEngineHandler(orderBook *OrderBook) *EngineHandler {
 	}
 }
 
-// OnEvent é a função que o Disruptor vai chamar 60 milhões de vezes por segundo.
+// OnEvent traduz o evento do Disruptor para a linguagem do Motor e o processa.
 func (h *EngineHandler) OnEvent(event disruptor.OrderEvent, sequence uint64) {
-	// 1. Traduzimos a "Bala" do Disruptor para a linguagem do Motor
-	order := Order{
+	h.orderBook.Process(Order{
 		ID:       event.OrderID,
 		Quantity: event.Quantity,
 		Price:    event.Price,
 		// Como ambos os Sides são uint8 por baixo dos panos, podemos converter direto
 		Side: Side(event.Side),
-	}
-
-	// 2. Opcional: Imprimir na tela só pra gente ver a mágica acontecendo hoje
-	sideStr := "COMPRA"
-	if order.Side == Sell {
-		sideStr = "VENDA"
-	}
-
-	fmt.Printf("[SEQ %d] Recebida ordem de %s: %d BTC a $%d\n", sequence, sideStr, order.Quantity, order.Price)
-
-	// 3. O Disparo! Injeta a ordem no Pac-Man.
-	h.orderBook.Process(order)
+	})
 }

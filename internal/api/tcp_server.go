@@ -11,16 +11,20 @@ import (
 	"github.com/FelipeFelipeRenan/goruptor/internal/storage"
 )
 
+// Respostas de 1 byte do protocolo TCP binário.
+const (
+	AckRejected byte = 0 // ordem NÃO confirmada (anel fechado ou journal falhou)
+	AckOK       byte = 1 // ordem confirmada: já está no journal
+)
+
 type TCPServer struct {
-	ringBuffer *disruptor.RingBuffer
-	wal        *storage.WAL
-	batcher    *storage.Batcher
+	ringBuffer orderPublisher
+	batcher    orderArchiver
 }
 
-func NewTCPServer(rb *disruptor.RingBuffer, wal *storage.WAL, batcher *storage.Batcher) *TCPServer {
+func NewTCPServer(rb *disruptor.RingBuffer, batcher *storage.Batcher) *TCPServer {
 	return &TCPServer{
 		ringBuffer: rb,
-		wal:        wal,
 		batcher:    batcher,
 	}
 }
@@ -45,11 +49,11 @@ func (s *TCPServer) Start(port string) error {
 func (s *TCPServer) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-
 	buf := make([]byte, 25)
-	
-	// Pré-alocamos o byte de resposta (ACK) para evitar alocação no loop
-	ack := []byte{1}
+
+	// Pré-alocamos os bytes de resposta (ACK) para evitar alocação no loop
+	ackOK := []byte{AckOK}
+	ackRejected := []byte{AckRejected}
 
 	for {
 		// 2. Leitura Binária Bloqueante
@@ -70,15 +74,17 @@ func (s *TCPServer) handleConnection(conn net.Conn) {
 			Side:     disruptor.Side(buf[24]),
 		}
 
-		// 4. Despacho Lock-Free para o Motor
-		s.wal.Log(event)
-		s.ringBuffer.Publish(event)
-		s.batcher.Push(event)
+		// 4. Despacho para o Motor + espera do journal (group commit).
+		// Muitas conexões esperando ao mesmo tempo dividem um único fsync.
+		if err := acceptOrder(s.ringBuffer, s.batcher, event); err != nil {
+			log.Printf("❌ ordem %d não confirmada: %v", event.OrderID, err)
+			conn.Write(ackRejected)
+			return
+		}
 
 		// 5. ACK Binário
-		// Enviamos 1 único byte de volta para o Cannon confirmar o sucesso
-		_, err = conn.Write(ack)
-		if err != nil {
+		// 1 único byte: AckOK só é enviado depois que a ordem está no journal.
+		if _, err = conn.Write(ackOK); err != nil {
 			return
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/api"
 	"github.com/FelipeFelipeRenan/goruptor/internal/cloud"
@@ -30,11 +31,17 @@ func main() {
 	// 3. Instancia o Motor passando o AWS Publisher
 	book := matching.NewOrderBook(1, awsPub)
 	engineHandler := matching.NewEngineHandler(book)
-	ringBuffer := disruptor.NewRingBuffer(131072) // 2. INICIA O WRITE-AHEAD LOG (WAL)
+
+	// 2. INICIA O WRITE-AHEAD LOG (WAL)
 	wal, err := storage.NewWAL("goruptor_journal.jsonl")
 	if err != nil {
 		log.Fatalf("Falha ao iniciar o WAL: %v", err)
 	}
+
+	// O WAL é o journal do anel: um estágio dedicado lê o anel em ordem de
+	// sequência, grava em lote com fsync e só então libera o motor e o ACK.
+	journalOpts := journalOptionsFromEnv()
+	ringBuffer := disruptor.NewJournaledRingBuffer(131072, wal, journalOpts)
 
 	// --- ⏪ A MÁQUINA DO TEMPO (RECOVERY) ---
 	fmt.Println("⏳ Lendo Write-Ahead Log para restaurar a memória...")
@@ -63,24 +70,25 @@ func main() {
 	if err != nil {
 		log.Fatalf("Falha ao conectar no RDS da AWS: %v", err)
 	}
+	// LIGAMOS O JOURNALER (só depois do replay: ele começa a gravar eventos novos)
+	go ringBuffer.StartJournaler()
 	// LIGAMOS O MOTOR
 	go ringBuffer.StartConsumer(engineHandler)
 
 	fmt.Println("✅ Motor LMAX Disruptor rodando. Aguardando ordens...\n--- 🔔 PREGÃO ABERTO ---")
-	httpServer := api.NewServer(ringBuffer, book, wal, batcher)
+	httpServer := api.NewServer(ringBuffer, book, batcher)
 	go func() {
 		if err := httpServer.Start(":3000"); err != nil {
 			log.Fatalf("Erro no servidor HTTP: %v", err)
 		}
 	}()
 
-	tcpServer := api.NewTCPServer(ringBuffer, wal, batcher)
+	tcpServer := api.NewTCPServer(ringBuffer, batcher)
 	go func() {
 		if err := tcpServer.Start(":3001"); err != nil {
 			log.Fatalf("Erro no servidor TCP: %v", err)
 		}
 	}()
-
 
 	quit := make(chan os.Signal, 1)
 
@@ -93,4 +101,24 @@ func main() {
 	<-quit
 
 	fmt.Println("\n🛑 Sinal recebido! Desligando os motores da Goruptor...")
+}
+
+// journalOptionsFromEnv lê GORUPTOR_WAL_SYNC:
+//
+//	"always" (padrão) ou vazio -> fsync a cada lote; ACK == ordem em disco.
+//	uma duração ("200ms", "1s") -> fsync no máximo a cada intervalo; ACK após
+//	                               o write no SO. Mais rápido, mas uma queda de
+//	                               energia pode perder até esse intervalo.
+func journalOptionsFromEnv() disruptor.JournalOptions {
+	v := os.Getenv("GORUPTOR_WAL_SYNC")
+	if v == "" || v == "always" {
+		fmt.Println("💾 WAL: fsync a cada lote (ACK só depois da ordem em disco)")
+		return disruptor.JournalOptions{}
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		log.Fatalf("GORUPTOR_WAL_SYNC inválido (%q): use \"always\" ou uma duração como \"200ms\"", v)
+	}
+	fmt.Printf("⚠️  WAL: fsync a cada %v (queda de energia pode perder até esse intervalo)\n", d)
+	return disruptor.JournalOptions{SyncInterval: d}
 }
