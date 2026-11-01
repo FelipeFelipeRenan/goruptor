@@ -80,4 +80,4 @@ cannon-dma-sell: ## Dispara 100k ordens de VENDA via TCP binário
 	cannon -u 127.0.0.1:3001 --mode tcp -c 100000 -w 150 \
 	  --body 'S,{{number}},{{number}},1'
 
-cannon-dma-peak: cannon-dma-sell cannon-dma-buy
+cannon-dma-peak: cannon-dma-sell cannon-dma-buy

@@ -27,9 +27,13 @@ go.work.sum
 # env file
 .env
 
-# Editor/IDE
+# Editor/IDE/SO
 .idea/
 .vscode/
+.DS_Store
+
+# Binários gerados por `make build`
+/bin/
 
 # Local .terraform directories
 **/.terraform/*
@@ -52,4 +56,5 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
-goruptor_journal.jsonl
+# WAL local (estado do motor; nunca versionar)
+goruptor_journal.jsonl*
