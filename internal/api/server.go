@@ -11,7 +11,6 @@ import (
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/pprof"
-
 )
 
 type OrderRequest struct {
@@ -26,14 +25,13 @@ type Server struct {
 	ringBuffer *disruptor.RingBuffer
 	orderBook  *matching.OrderBook
 	batcher    *storage.Batcher
-	wal        *storage.WAL
 
 	clients map[*websocket.Conn]bool
-	
+
 	mu sync.Mutex
 }
 
-func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, wal *storage.WAL, batcher *storage.Batcher) *Server {
+func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, batcher *storage.Batcher) *Server {
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 	})
@@ -45,7 +43,6 @@ func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, wal *storage.WA
 		ringBuffer: rb,
 		orderBook:  ob,
 		batcher:    batcher,
-		wal:        wal,
 		clients:    make(map[*websocket.Conn]bool),
 	}
 
@@ -97,14 +94,14 @@ func (s *Server) handleCreateOrder(ctx *fiber.Ctx) error {
 	event := disruptor.OrderEvent{
 		OrderID: req.OrderID, Price: req.Price, Quantity: req.Quantity, Side: side,
 	}
-	s.wal.Log(event)
-
-	s.ringBuffer.Publish(event)
-
-	s.batcher.Push(event)
+	// Só responde 202 depois que a ordem está no journal (em disco).
+	if err := acceptOrder(s.ringBuffer, s.batcher, event); err != nil {
+		log.Printf("❌ ordem %d não confirmada: %v", req.OrderID, err)
+		return ctx.Status(503).JSON(fiber.Map{"error": "ordem não confirmada, tente novamente"})
+	}
 
 	return ctx.Status(202).JSON(fiber.Map{
-		"message":  "Ordem recebida e enviada para o motor",
+		"message":  "Ordem confirmada e enviada para o motor",
 		"order_id": req.OrderID,
 	})
 }

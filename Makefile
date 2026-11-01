@@ -3,7 +3,7 @@ BINARY_NAME=goruptor-server
 MAIN_PATH=cmd/goruptor-server/main.go
 WAL_FILE=goruptor_journal.jsonl
 
-.PHONY: all setup up down infra run test clean nuke cannon-sell cannon-buy cannon-peak-buy cannon-peak-sell cannon-peak help cannon-dma-peak cannon-dma-sell cannon-dma-buy cannon-dma-peak
+.PHONY: all setup up down infra run test bench clean nuke cannon-sell cannon-buy cannon-peak-buy cannon-peak-sell cannon-peak help cannon-dma-peak cannon-dma-sell cannon-dma-buy cannon-dma-peak
 
 help: ## Exibe esta ajuda
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -36,8 +36,11 @@ nuke:
 run: ## Inicia a Corretora Go
 	go run $(MAIN_PATH)
 
-test: ## Roda os testes unitários de lógica financeira
-	go test -v ./internal/matching/...
+test: ## Roda todos os testes com o race detector
+	go test -race -count=1 ./...
+
+bench: ## Benchmarks: pipeline ponta a ponta e caminho durável (ACK após fsync)
+	go test -run xxx -bench 'Pipeline|Handler|Publish' -benchmem ./internal/matching/ ./internal/disruptor/
 
 clean: down ## Limpa o ambiente, para o docker e deleta o arquivo WAL
 	rm -f $(WAL_FILE)
@@ -77,4 +80,4 @@ cannon-dma-sell: ## Dispara 100k ordens de VENDA via TCP binário
 	cannon -u 127.0.0.1:3001 --mode tcp -c 100000 -w 150 \
 	  --body 'S,{{number}},{{number}},1'
 
-cannon-dma-peak: cannon-dma-sell cannon-dma-buy
+cannon-dma-peak: cannon-dma-sell cannon-dma-buy
