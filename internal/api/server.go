@@ -47,7 +47,7 @@ func NewServer(rb *disruptor.RingBuffer, ob *matching.OrderBook, batcher *storag
 	}
 
 	app.Get("/", func(c *fiber.Ctx) error {
-		return c.SendFile("./index.html")
+		return c.SendFile("./web/index.html")
 	})
 
 	app.Post("/api/orders", server.handleCreateOrder)

@@ -1,3 +1,7 @@
+# Infraestrutura LOCAL do Goruptor: SQS e RDS emulados pelo MiniStack
+# (docker-compose.yml, porta 4566). Credenciais "test" são as do emulador;
+# nada aqui fala com a AWS de verdade.
+
 terraform {
   required_providers {
     aws = {
@@ -8,14 +12,13 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-east-1"
+  region     = "us-east-1"
   access_key = "test"
   secret_key = "test"
 
   skip_credentials_validation = true
-  skip_metadata_api_check = true
-  skip_requesting_account_id = true
-
+  skip_metadata_api_check     = true
+  skip_requesting_account_id  = true
 
   endpoints {
     sqs = "http://localhost:4566"
@@ -28,6 +31,6 @@ resource "aws_sqs_queue" "goruptor_trades" {
 }
 
 output "sqs_queue_url" {
-  value = "aws_sqs_queue.goruptor_trades.url"
-  description = "Queue URL that Go code is set to use"
+  value       = aws_sqs_queue.goruptor_trades.url
+  description = "URL da fila de trades (o código Go usa o valor fixo em internal/cloud/sqs.go)"
 }

@@ -53,7 +53,7 @@ func (s *Server) handleGetCandles(c *fiber.Ctx) error {
 	if len(candles) == 0 {
 		return c.SendStatus(200)
 	}
-	
+
 	// Envelopamos o Array dentro de um objeto pra blindar contra o parser do HTMX
 	response := map[string]interface{}{
 		"candles": candles,
