@@ -1,1 +1,140 @@
-# goruptor
+# Goruptor
+
+Motor de matching de ordens (uma "corretora" em miniatura) escrito em Go, inspirado na arquitetura **LMAX Disruptor**:
+ring buffer lock-free, um único consumidor de negócio, journal em disco e prioridade preço-tempo.
+
+> **Status: projeto de estudo / laboratório.** O núcleo (ring buffer, WAL, order book) é sólido e bem testado,
+> mas faltam peças para operar de verdade (validação, autenticação, cancelamento de ordens...). Veja
+> [Limitações conhecidas](#limitações-conhecidas).
+
+## O que ele faz
+
+- Recebe ordens de compra/venda por **HTTP** (JSON) ou por **TCP binário** (frames de 25 bytes).
+- Só **confirma** uma ordem (ACK) depois de ela estar gravada em disco (WAL com `fsync` em lote).
+- Casa as ordens num order book em memória (melhor preço primeiro, FIFO dentro do mesmo preço).
+- Se o processo cair, **reproduz o WAL** e reconstrói exatamente o mesmo livro.
+- Publica trades no SQS, arquiva ordens no Postgres e mostra livro + candles num dashboard web.
+
+```mermaid
+flowchart LR
+    C[Clientes<br/>HTTP :3000 / TCP :3001] --> R[(Ring Buffer)]
+    R --> J[Journaler] --> W[(WAL em disco)]
+    J --> E[Motor / Order Book]
+    E --> Q[SQS]
+    C -. ACK só após o fsync .- J
+    C --> B[Batcher] --> PG[(Postgres)]
+```
+
+Detalhes e garantias: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Como rodar
+
+**Pré-requisitos:** Go (versão do `go.mod`), Docker com `docker-compose` e Terraform.
+
+```bash
+make setup   # sobe o MiniStack (AWS local) e provisiona SQS + RDS com Terraform
+make run     # inicia o servidor (rode da raiz do repositório)
+```
+
+Abra <http://localhost:3000> para ver o livro de ofertas e os candles. Enviando uma ordem:
+
+```bash
+curl -X POST localhost:3000/api/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"order_id": 1, "price": 65000, "quantity": 2, "side": "SELL"}'
+# 202 {"message":"Ordem confirmada e enviada para o motor","order_id":1}
+```
+
+`make` (sem argumentos) lista todos os atalhos.
+
+### Portas e endpoints
+
+| Porta / rota | Descrição |
+|---|---|
+| `:3000` `GET /` | Dashboard (`web/index.html`) |
+| `:3000` `POST /api/orders` | Envia uma ordem. `202` = confirmada em disco; `503` = **não** confirmada |
+| `:3000` `GET /api/candles` | Candles de 1 min (devolvidos no header `HX-Trigger`, usado pelo HTMX) |
+| `:3000` `GET /ws` | WebSocket: snapshot do livro (10 níveis por lado) a cada 200 ms |
+| `:3000` `/debug/pprof/` | Profiling do Go |
+| `:3001` | TCP binário (protocolo abaixo) |
+
+### Protocolo TCP binário
+
+Cada ordem é um frame de **25 bytes**, big-endian:
+
+| Bytes | Campo | Tipo |
+|---|---|---|
+| `0..8` | `OrderID` | `uint64` |
+| `8..16` | `Price` | `uint64` |
+| `16..24` | `Quantity` | `uint64` |
+| `24` | `Side` | `uint8` (`0` = BUY, `1` = SELL) |
+
+O servidor responde **1 byte por ordem**: `1` = confirmada (já está no WAL em disco), `0` = recusada
+(em seguida a conexão é encerrada). Pode-se enviar vários frames em pipeline. Exemplo de cliente: [`cmd/dma-loadtest`](cmd/dma-loadtest/main.go).
+
+### Durabilidade
+
+A variável `GORUPTOR_WAL_SYNC` escolhe o equilíbrio entre segurança e velocidade:
+
+| Valor | Comportamento |
+|---|---|
+| `always` (padrão) | `fsync` a cada lote; ACK só depois da ordem em disco. Sobrevive a queda de energia. |
+| `200ms`, `1s`... | `fsync` no máximo a cada intervalo; ACK após o `write` no SO. Mais rápido; queda de energia pode perder até o intervalo. |
+
+## Testes e benchmarks
+
+```bash
+make test       # todos os testes, com o race detector
+make bench      # benchmarks do pipeline e do caminho durável
+make loadtest   # carga no TCP (com o servidor rodando): ordens confirmadas/s
+make check      # o mesmo que a CI: gofmt + vet + testes
+```
+
+Alguns testes que valem a leitura:
+
+- **Replay determinístico**: 8 produtores concorrentes, WAL real; um livro novo reproduzindo o WAL fica idêntico ao vivo, com os mesmos trades.
+- **Crash em cada byte**: trunca o WAL em todas as posições possíveis e exige recuperação íntegra.
+- **ACK implica em disco**: um leitor independente lê o arquivo durante a carga e confirma que nenhum ACK saiu adiantado.
+- **Falha de disco e shutdown sob carga**: ninguém trava e nenhuma ordem aceita se perde.
+
+Ordem de grandeza medida num container de 2 vCPUs (no seu hardware os números mudam):
+
+| Medida | Resultado |
+|---|---|
+| Matching + handler, 1 núcleo | ~265 ns por ordem (~3,8 M ordens/s) |
+| Pipeline ponta a ponta (anel + motor), sem disco | ~2 a 3 M ordens/s |
+| Ordens **confirmadas** (ACK após `fsync` real) | ~61 mil/s, ~30 ordens por `fsync` (depende muito do disco) |
+
+## Estrutura do projeto
+
+```
+cmd/
+  goruptor-server/   servidor (HTTP + TCP + motor)
+  dma-loadtest/      cliente de carga do TCP binário
+internal/
+  disruptor/         ring buffer lock-free + estágio de journal (group commit)
+  matching/          order book, heaps de preço e handler do motor
+  storage/           WAL (JSON Lines) e batcher do Postgres
+  api/               HTTP (Fiber), TCP binário e candles
+  cloud/             publicador SQS
+infra/               Terraform do ambiente local (SQS + RDS no MiniStack)
+web/                 dashboard (HTMX + lightweight-charts)
+docs/                documentação de arquitetura
+```
+
+## Limitações conhecidas
+
+O que ainda falta (ordenado por impacto):
+
+- **Sem validação de entrada**: `side` desconhecido vira BUY; preço e quantidade `0` são aceitos; `order_id` repetido não é detectado (o Postgres descarta em silêncio).
+- **Shutdown não drena**: no `SIGTERM` o processo apenas sai. Ordens já confirmadas estão salvas no WAL, mas o lote pendente do Postgres e os trades pendentes do SQS são perdidos.
+- **`trade_history` guarda ordens, não trades**: os candles são calculados com o preço das ordens enviadas, não com o preço de execução.
+- `AccountID`, `AssetID`, `BuyerID` e `SellerID` existem nas structs mas nunca são preenchidos; só há um ativo.
+- Sem cancelamento/modificação de ordens e sem ordens a mercado.
+- O WAL nunca é truncado e não há snapshot: o boot reprocessa o histórico inteiro.
+- Credenciais e endpoints fixos no código, `pprof` e API sem autenticação (aceitável só em ambiente local).
+- O consumidor do motor usa espera ocupada (`Gosched`) e ocupa um núcleo mesmo sem tráfego.
+
+## Licença
+
+Ainda não definida.
