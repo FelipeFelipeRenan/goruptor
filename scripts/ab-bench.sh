@@ -41,7 +41,7 @@ cannon_rps()  { awk '/Requests\/sec/ {print $2; exit}'; }
 cannon_409()  { awk '/HTTP 409/ {print $3; f=1; exit} END {if(!f) print 0}'; }
 loadtest_rate() { awk '/ordens confirmadas\/s/ {print $2; exit}'; }
 loadtest_lat() { # <min|mean|p50|p95|p99|max> < saída do dma-loadtest  -> ex.: 1.23ms
-  local v; v=$(sed -nE "s/.*latência.* $1=([0-9.]+).*/\1/p" | head -1)
+  local v; v=$(sed -nE "s/.*latência.* $1=(-?[0-9.]+).*/\1/p" | head -1)
   [[ -n $v ]] && echo "${v}ms" || echo "-"
 }
 dd_ms_per_write() { # <writes> < saída do dd -> ms por escrita síncrona

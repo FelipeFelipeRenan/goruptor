@@ -56,6 +56,12 @@ type latStats struct {
 	min, mean, p50, p95, p99, max float64
 }
 
+// t0 e nowNs: relógio MONOTÔNICO. O relógio de parede (UnixNano) pode andar para
+// trás (ajuste de hora, WSL/VM) e produzia latências negativas.
+var t0 = time.Now()
+
+func nowNs() int64 { return int64(time.Since(t0)) }
+
 func ms(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 
 func summarize(lat []time.Duration) latStats {
@@ -180,7 +186,7 @@ func runConn(addr string, firstID uint64, n int, timeout time.Duration, window i
 				}
 				return
 			}
-			res.lat = append(res.lat, time.Duration(time.Now().UnixNano()-atomic.LoadInt64(&sendNs[i])))
+			res.lat = append(res.lat, time.Duration(nowNs()-atomic.LoadInt64(&sendNs[i])))
 			if sem != nil {
 				<-sem
 			}
@@ -212,7 +218,7 @@ func runConn(addr string, firstID uint64, n int, timeout time.Duration, window i
 		binary.BigEndian.PutUint64(frame[8:16], 1000+uint64(i%64))
 		binary.BigEndian.PutUint64(frame[16:24], 1)
 		frame[24] = byte(i % 2)
-		atomic.StoreInt64(&sendNs[i], time.Now().UnixNano())
+		atomic.StoreInt64(&sendNs[i], nowNs())
 		_, werr := bw.Write(frame)
 		if werr == nil && sem != nil {
 			werr = bw.Flush() // com janela, cada ordem sai na hora (senão a latência mediria o buffer)
