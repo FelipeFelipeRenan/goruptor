@@ -88,11 +88,14 @@ O que sobra de alocações é o boxing dos argumentos exigido pelo `database/sql
 
 Medido com `make ab` (`scripts/ab-bench.sh`): Ubuntu no WSL2 sobre Windows 11, cliente e servidor na mesma máquina,
 Postgres e SQS no MiniStack, `fsync` de 1,2 a 3,9 ms por escrita síncrona. Duas rodadas alternadas por versão,
-100 mil ordens, todas aceitas e com ACK após o `fsync`.
+100 mil ordens, todas aceitas e com ACK após o `fsync`. Na carga com janela, a latência mínima das duas versões
+é um ciclo de `fsync` (~4,4 a 4,8 ms na main; 1,9 a 4,6 ms na perf, conforme o disco da rodada).
 
 | Carga | main | perf/bottlenecks |
 |---|---|---|
-| TCP em pipeline (`dma-loadtest`, 16 conexões) | ~2,4 a 2,7 mil ordens/s | **~53 a 58 mil ordens/s** (~22x) |
+| TCP em pipeline, rajada (`dma-loadtest`, 16 conexões) | ~2,4 a 2,7 mil ordens/s | **~53 a 58 mil ordens/s** (~22x) |
+| TCP em pipeline, janela de 32 por conexão: vazão | ~2,1 a 4,0 mil ordens/s | **~31 a 62 mil ordens/s** |
+| mesma carga: latência mean / p99 | 129 a 243 ms / ~320 ms | **8 a 16 ms / 23 a 27 ms** |
 | HTTP, 150 clientes, um pedido em voo por conexão | ~18 a 19 mil req/s | ~18 a 19 mil req/s (empate) |
 
 O ganho no TCP não depende da velocidade do disco: a main ficou em ~2,5 mil/s com o disco rápido e com o lento, e a
