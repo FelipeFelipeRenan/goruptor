@@ -55,7 +55,11 @@ func (h countingHandler) OnEvent(e disruptor.OrderEvent, seq uint64) {
 	h.n.Add(1)
 }
 
-func newStack(t *testing.T) *stack {
+func newStack(t testing.TB) *stack {
+	return newStackWith(t, disruptor.JournalOptions{})
+}
+
+func newStackWith(t testing.TB, jopts disruptor.JournalOptions) *stack {
 	t.Helper()
 	s := &stack{walPath: filepath.Join(t.TempDir(), "journal.jsonl")}
 
@@ -76,7 +80,7 @@ func newStack(t *testing.T) *stack {
 	pub := &cloud.AWSPublisher{TradeCh: s.tradesCh}
 
 	s.book = matching.NewOrderBook(1, pub)
-	s.ring = disruptor.NewJournaledRingBuffer(1<<14, s.wal, disruptor.JournalOptions{})
+	s.ring = disruptor.NewJournaledRingBuffer(1<<14, s.wal, jopts)
 	go s.ring.StartJournaler()
 	go s.ring.StartConsumer(countingHandler{matching.NewEngineHandler(s.book), &s.processed})
 

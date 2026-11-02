@@ -181,26 +181,31 @@ func (b *Batcher) flush(batch []disruptor.OrderEvent) {
 // postgresSink devolve o sink que faz o INSERT em massa na tabela trade_history.
 func postgresSink(db *sql.DB) BatchSink {
 	return func(ctx context.Context, batch []disruptor.OrderEvent) error {
-		valueStrings := make([]string, 0, len(batch))
-		valueArgs := make([]interface{}, 0, len(batch)*4)
-
-		i := 1
-		for _, order := range batch {
-			valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d)", i, i+1, i+2, i+3))
-
-			sideStr := "BUY"
-			if order.Side == disruptor.Sell {
-				sideStr = "SELL"
-			}
-
-			valueArgs = append(valueArgs, order.OrderID, order.Price, order.Quantity, sideStr)
-			i += 4
-		}
-
-		stmt := fmt.Sprintf("INSERT INTO trade_history (order_id, price, quantity, side) VALUES %s ON CONFLICT DO NOTHING",
-			strings.Join(valueStrings, ","))
-
-		_, err := db.ExecContext(ctx, stmt, valueArgs...)
+		stmt, args := buildInsert(batch)
+		_, err := db.ExecContext(ctx, stmt, args...)
 		return err
 	}
+}
+
+// buildInsert monta o INSERT em massa (4 parâmetros por ordem).
+func buildInsert(batch []disruptor.OrderEvent) (string, []interface{}) {
+	valueStrings := make([]string, 0, len(batch))
+	valueArgs := make([]interface{}, 0, len(batch)*4)
+
+	i := 1
+	for _, order := range batch {
+		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d)", i, i+1, i+2, i+3))
+
+		sideStr := "BUY"
+		if order.Side == disruptor.Sell {
+			sideStr = "SELL"
+		}
+
+		valueArgs = append(valueArgs, order.OrderID, order.Price, order.Quantity, sideStr)
+		i += 4
+	}
+
+	stmt := fmt.Sprintf("INSERT INTO trade_history (order_id, price, quantity, side) VALUES %s ON CONFLICT DO NOTHING",
+		strings.Join(valueStrings, ","))
+	return stmt, valueArgs
 }
