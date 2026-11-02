@@ -19,7 +19,8 @@
 #   GORUPTOR_WAL_SYNC=200ms scripts/ab-bench.sh      # sem fsync por lote (isola o disco)
 #
 # Variáveis: REFS, ROUNDS (2), LOAD=auto|cannon|loadtest, N (100000), C (150 cannon / 16 loadtest),
-#            PG_CONTAINER (ministack-rds-goruptor-db), GORUPTOR_WAL_SYNC (repassada ao servidor).
+#            PG_CONTAINER (ministack-rds-goruptor-db), MIN_FREE_MB (1024; espaço mínimo no container do
+#            Postgres, 0 desliga), GORUPTOR_WAL_SYNC (repassada ao servidor).
 set -uo pipefail
 
 REFS=${REFS:-"main perf/bottlenecks"}
@@ -62,13 +63,22 @@ selftest() {
 die() { echo "❌ $*" >&2; exit 1; }
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
+# pg_run executa SQL no Postgres: psql local se existir, senão dentro do container.
+pg_run() {
+  if command -v psql >/dev/null 2>&1 && psql "$PG_URL" -qc "$1" >/dev/null 2>&1; then return 0; fi
+  docker exec "$PG_CONTAINER" psql -U goruptor -d exchange -qc "$1" >/dev/null 2>&1
+}
+
 truncate_pg() {
-  local sql="TRUNCATE trade_history"
-  if command -v psql >/dev/null 2>&1; then
-    psql "$PG_URL" -qc "$sql" >/dev/null 2>&1 && return 0
-  fi
-  docker exec "$PG_CONTAINER" psql -U goruptor -d exchange -qc "$sql" >/dev/null 2>&1 && return 0
-  echo "   ⚠️  não consegui truncar trade_history (a tabela pode ainda não existir; seguindo)"
+  # Dois comandos separados: CHECKPOINT não roda dentro de um bloco de transação.
+  # O CHECKPOINT deixa o Postgres reciclar o WAL entre as rodadas (disco).
+  pg_run "TRUNCATE trade_history" || { echo "   ⚠️  não consegui truncar trade_history (a tabela pode ainda não existir; seguindo)"; return 0; }
+  pg_run "CHECKPOINT" || true
+}
+
+# Espaço livre (MB) dentro do container do Postgres; vazio se não der para medir.
+pg_free_mb() {
+  docker exec "$PG_CONTAINER" df -Pm /var/lib/postgresql/data 2>/dev/null | awk 'NR==2 {print $4}'
 }
 
 SERVER_PID=""
@@ -131,6 +141,13 @@ main() {
     port_open 4566 || die "SQS/MiniStack (porta 4566) fora do ar. Rode 'make up' (ou make setup)."
   fi
 
+  local free
+  free=$(pg_free_mb)
+  if [[ -n $free ]]; then
+    echo "💽 espaço livre no container do Postgres: ${free} MB"
+    (( free < ${MIN_FREE_MB:-1024} )) && die "pouco espaço no container do Postgres (${free} MB). No WSL/Docker o disco virtual enche: veja 'docker system df', rode 'docker system prune' ou 'make nuke && make setup'. (MIN_FREE_MB=0 ignora)"
+  fi
+
   local stamp res_dir tsv
   stamp=$(date +%Y%m%d-%H%M%S)
   res_dir="bench-results/$stamp"; mkdir -p "$res_dir"
@@ -156,6 +173,11 @@ main() {
 
       rm -f "$dir/goruptor_journal.jsonl" "$out.rows"
       truncate_pg
+      free=$(pg_free_mb)
+      if [[ -n $free ]] && (( free < ${MIN_FREE_MB:-1024} )); then
+        echo "   ❌ só ${free} MB livres no container do Postgres; parando antes de ele cair. Veja 'docker system df' / make nuke && make setup."
+        break 2
+      fi
 
       disk=$(dd if=/dev/zero of="$dir/fs.tmp" bs=4k count=500 oflag=dsync 2>&1 | dd_ms_per_write 500)
       rm -f "$dir/fs.tmp"
