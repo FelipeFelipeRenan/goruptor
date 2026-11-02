@@ -16,6 +16,9 @@ type Candle struct {
 	Volume uint64 `json:"volume"`
 }
 
+// A consulta olha só as últimas 6 horas (no máximo 360 candles de 1 min). Antes
+// agregava a tabela inteira a cada 5 s por dashboard aberto, e o resultado ia
+// num header HTTP que crescia sem limite. Usa o índice em created_at (batcher.go).
 func (s *Server) handleGetCandles(c *fiber.Ctx) error {
 	// A Query Blindada com Casts ::BIGINT
 	query := `
@@ -27,6 +30,7 @@ func (s *Server) handleGetCandles(c *fiber.Ctx) error {
 			(array_agg(price ORDER BY created_at DESC))[1]::BIGINT AS close,
 			SUM(quantity)::BIGINT AS volume
 		FROM trade_history
+		WHERE created_at >= NOW() - INTERVAL '6 hours'
 		GROUP BY date_trunc('minute', created_at)
 		ORDER BY time ASC;
 	`

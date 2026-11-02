@@ -69,6 +69,12 @@ func NewBatcher(connStr string, batchSize int) (*Batcher, error) {
 		return nil, fmt.Errorf("criando a tabela trade_history: %w", err)
 	}
 
+	// Os candles filtram por janela de tempo; sem o índice cada consulta varre a tabela.
+	if _, err = db.Exec(`CREATE INDEX IF NOT EXISTS trade_history_created_at_idx ON trade_history (created_at)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("criando o índice de trade_history: %w", err)
+	}
+
 	b := NewBatcherWithSink(postgresSink(db), batchSize, defaultFlushInterval)
 	b.DB = db
 	return b, nil

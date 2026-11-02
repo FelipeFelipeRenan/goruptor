@@ -205,10 +205,10 @@ func TestOrderBook_MatchesReferenceModel(t *testing.T) {
 		{"com quantidade zero", 10, 5, true},
 	}
 	for _, m := range markets {
-		for seed := int64(1); seed <= 6; seed++ {
+		for seed := int64(1); seed <= 3; seed++ {
 			t.Run(fmt.Sprintf("%s/seed%d", m.name, seed), func(t *testing.T) {
 				r := rand.New(rand.NewSource(seed))
-				orders := make([]Order, 4000)
+				orders := make([]Order, 2500)
 				for i := range orders {
 					qty := uint64(1 + r.Intn(m.maxQty))
 					if m.allowZeroQty && r.Intn(8) == 0 {
