@@ -53,8 +53,9 @@ run: ## Inicia o servidor (rode da raiz do repositório: ele serve web/index.htm
 test: ## Roda todos os testes com o race detector
 	go test -race -count=1 ./...
 
-bench: ## Benchmarks: pipeline ponta a ponta e caminho durável (ACK após fsync)
-	go test -run xxx -bench 'Pipeline|Handler|Publish' -benchmem ./internal/matching/ ./internal/disruptor/
+bench: ## Benchmarks: anel, motor, WAL, batcher e TCP ponta a ponta
+	go test -run xxx -bench . -benchtime 1s -benchmem ./internal/matching/ ./internal/disruptor/ ./internal/storage/ ./internal/ingest/
+	go test -run xxx -bench E2E -benchtime 50000x ./internal/app/
 
 fmt: ## Formata o código (gofmt)
 	gofmt -w .

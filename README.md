@@ -25,7 +25,7 @@ flowchart LR
     C --> B[Batcher] --> PG[(Postgres)]
 ```
 
-Detalhes e garantias: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Detalhes e garantias: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Desempenho: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Como rodar
 
@@ -53,7 +53,7 @@ curl -X POST localhost:3000/api/orders \
 |---|---|
 | `:3000` `GET /` | Dashboard (`web/index.html`) |
 | `:3000` `POST /api/orders` | Envia uma ordem. `202` = confirmada em disco; `400` = ordem inválida; `409` = `order_id` já usado; `503` = **não** confirmada |
-| `:3000` `GET /api/candles` | Candles de 1 min (devolvidos no header `HX-Trigger`, usado pelo HTMX) |
+| `:3000` `GET /api/candles` | Candles de 1 min das últimas 6 h (devolvidos no header `HX-Trigger`, usado pelo HTMX) |
 | `:3000` `GET /ws` | WebSocket: snapshot do livro (10 níveis por lado) a cada 200 ms |
 | `:3000` `/debug/pprof/` | Profiling do Go |
 | `:3001` | TCP binário (protocolo abaixo) |
@@ -78,7 +78,7 @@ O servidor responde **1 byte por ordem**:
 | `3` | `order_id` já utilizado | continua |
 | `0` | **Não** confirmada (servidor desligando ou disco com falha) | é encerrada |
 
-Pode-se enviar vários frames em pipeline. Exemplo de cliente: [`cmd/dma-loadtest`](cmd/dma-loadtest/main.go).
+Pode-se enviar vários frames em pipeline: o servidor confirma em lote, com **um `fsync` por lote de frames lidos**, não por frame. Exemplo de cliente: [`cmd/dma-loadtest`](cmd/dma-loadtest/main.go).
 
 ### Regras de validação
 
@@ -109,7 +109,7 @@ A variável `GORUPTOR_WAL_SYNC` escolhe o equilíbrio entre segurança e velocid
 
 ```bash
 make test       # todos os testes, com o race detector
-make bench      # benchmarks do pipeline e do caminho durável
+make bench      # benchmarks (anel, motor, WAL, TCP ponta a ponta); veja docs/PERFORMANCE.md
 make loadtest   # carga no TCP (com o servidor rodando): ordens confirmadas/s
 make check      # o mesmo que a CI: gofmt + vet + testes
 ```
@@ -127,7 +127,10 @@ Ordem de grandeza medida num container de 2 vCPUs (no seu hardware os números m
 |---|---|
 | Matching + handler, 1 núcleo | ~265 ns por ordem (~3,8 M ordens/s) |
 | Pipeline ponta a ponta (anel + motor), sem disco | ~2 a 3 M ordens/s |
-| Ordens **confirmadas** (ACK após `fsync` real) | ~61 mil/s, ~30 ordens por `fsync` (depende muito do disco) |
+| TCP ponta a ponta, em pipeline, ACK após `fsync` | ~490 mil ordens/s (depende muito do disco) |
+| Anel com 128 produtores concorrentes | ~200 ns por ordem |
+
+Análise de gargalos, antes/depois e como reproduzir: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Estrutura do projeto
 
@@ -156,7 +159,6 @@ O que ainda falta (ordenado por impacto):
 - Sem cancelamento/modificação de ordens e sem ordens a mercado.
 - O WAL nunca é truncado e não há snapshot: o boot reprocessa o histórico inteiro.
 - Credenciais e endpoints fixos no código, `pprof` e API sem autenticação (aceitável só em ambiente local).
-- O consumidor do motor usa espera ocupada (`Gosched`) e ocupa um núcleo mesmo sem tráfego.
 
 ## Licença
 
