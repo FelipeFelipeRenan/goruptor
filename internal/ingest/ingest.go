@@ -100,22 +100,43 @@ func (in *Ingress) IDs() *IDSet { return in.ids }
 //
 //	ErrInvalidOrder, ErrDuplicateOrder -> culpa do cliente
 //	ErrUnavailable                     -> servidor não confirmou a ordem
+//
+// Submit = Admit + Confirm. Quem recebe várias ordens de uma vez (conexão TCP em
+// pipeline) usa as duas etapas separadas, para esperar o journal UMA vez por
+// lote em vez de uma vez por ordem.
 func (in *Ingress) Submit(event disruptor.OrderEvent) error {
-	if err := Validate(event); err != nil {
+	seq, err := in.Admit(event)
+	if err != nil {
 		return err
 	}
+	return in.Confirm(event, seq)
+}
+
+// Admit valida, deduplica e publica a ordem no anel, SEM esperar o disco.
+// Devolve a sequência para Confirm. Os erros são os mesmos de Submit, exceto
+// que ErrUnavailable aqui significa "a ordem NÃO entrou no anel".
+func (in *Ingress) Admit(event disruptor.OrderEvent) (seq uint64, err error) {
+	if err := Validate(event); err != nil {
+		return 0, err
+	}
 	if !in.ids.Register(event.OrderID) {
-		return fmt.Errorf("%w: %d", ErrDuplicateOrder, event.OrderID)
+		return 0, fmt.Errorf("%w: %d", ErrDuplicateOrder, event.OrderID)
 	}
 
-	seq, err := in.pub.Publish(event)
+	seq, err = in.pub.Publish(event)
 	if err != nil {
 		// Nada foi para o anel: liberar o ID permite ao cliente tentar de novo
 		// (por exemplo, depois do reinício do servidor).
 		in.ids.Forget(event.OrderID)
-		return fmt.Errorf("%w: %w", ErrUnavailable, err)
+		return 0, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
+	return seq, nil
+}
 
+// Confirm espera a ordem admitida (sequência seq) estar em disco e a arquiva.
+// Retorna nil SOMENTE com a ordem durável. Chamar Confirm em ordem crescente de
+// sequência é barato: só a primeira chamada de um lote bloqueia.
+func (in *Ingress) Confirm(event disruptor.OrderEvent, seq uint64) error {
 	if err := in.pub.WaitDurable(seq); err != nil {
 		// A ordem JÁ está no anel e pode ou não ter chegado ao disco: resultado
 		// ambíguo. O ID continua registrado de propósito, para ela não ser

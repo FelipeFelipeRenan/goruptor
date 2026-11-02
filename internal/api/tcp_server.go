@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -170,6 +171,18 @@ func (s *TCPServer) isClosing() bool {
 	return s.closing
 }
 
+// maxPipeline limita quantos frames de uma conexão são processados por lote.
+const maxPipeline = 256
+
+// handleConnection atende uma conexão. Clientes em pipeline (vários frames
+// enviados sem esperar ACK) são atendidos em LOTES: lê-se tudo o que já está no
+// buffer do socket, publica-se tudo no anel, espera-se o journal e responde-se
+// com um único write. Antes, cada frame esperava o próprio fsync antes de o
+// próximo ser sequer lido, o que limitava cada conexão a um frame por fsync.
+//
+// Os ACKs saem sempre na ordem dos frames. Se o journal falhar no meio de um
+// lote, os frames anteriores já confirmados recebem AckOK, o frame afetado
+// recebe AckRejected e a conexão é encerrada.
 func (s *TCPServer) handleConnection(conn net.Conn) {
 	defer func() {
 		conn.Close()
@@ -179,45 +192,83 @@ func (s *TCPServer) handleConnection(conn net.Conn) {
 		s.wg.Done()
 	}()
 
-	buf := make([]byte, frameSize)
+	type pending struct {
+		event disruptor.OrderEvent
+		seq   uint64
+		ack   byte // AckOK = ainda precisa de Confirm; demais = resultado já decidido
+	}
 
-	// Pré-alocamos os bytes de resposta (ACK) para evitar alocação no loop
-	acks := [4][]byte{{AckRejected}, {AckOK}, {AckInvalid}, {AckDuplicate}}
+	var (
+		br    = bufio.NewReaderSize(conn, 64*1024)
+		buf   [frameSize]byte
+		batch = make([]pending, 0, maxPipeline)
+		out   = make([]byte, 0, maxPipeline)
+	)
 
 	for {
-		// Leitura binária bloqueante: só avança com exatamente 25 bytes.
-		if _, err := io.ReadFull(conn, buf); err != nil {
-			if !s.isClosing() && err != io.EOF && !errors.Is(err, net.ErrClosed) && !errors.Is(err, syscall.ECONNRESET) {
-				log.Printf("❌ Fim da conexão ou erro na leitura do socket: %v\n", err)
+		batch = batch[:0]
+		out = out[:0]
+		fatal := false
+
+		// 1. Leitura: o primeiro frame bloqueia; os seguintes só entram se já
+		//    estiverem no buffer (nunca esperamos o cliente para fechar o lote).
+		for len(batch) < maxPipeline && !fatal {
+			if len(batch) > 0 && br.Buffered() < frameSize {
+				break
 			}
-			return
+			if _, err := io.ReadFull(br, buf[:]); err != nil {
+				if len(batch) == 0 {
+					if !s.isClosing() && err != io.EOF && !errors.Is(err, net.ErrClosed) && !errors.Is(err, syscall.ECONNRESET) {
+						log.Printf("❌ Fim da conexão ou erro na leitura do socket: %v\n", err)
+					}
+					return
+				}
+				break // processa o que já foi lido; o erro reaparece na próxima leitura
+			}
+
+			// Deserialização via bit shifting.
+			event := disruptor.OrderEvent{
+				OrderID:  binary.BigEndian.Uint64(buf[0:8]),
+				Price:    binary.BigEndian.Uint64(buf[8:16]),
+				Quantity: binary.BigEndian.Uint64(buf[16:24]),
+				Side:     disruptor.Side(buf[24]),
+			}
+
+			// 2. Admissão: valida, deduplica e publica, sem esperar o disco.
+			p := pending{event: event}
+			switch seq, err := s.ingress.Admit(event); {
+			case err == nil:
+				p.seq, p.ack = seq, AckOK
+			case errors.Is(err, ingest.ErrInvalidOrder):
+				p.ack = AckInvalid
+			case errors.Is(err, ingest.ErrDuplicateOrder):
+				p.ack = AckDuplicate
+			default:
+				log.Printf("❌ ordem %d não confirmada: %v", event.OrderID, err)
+				p.ack = AckRejected
+				fatal = true
+			}
+			batch = append(batch, p)
 		}
 
-		// Deserialização via bit shifting.
-		event := disruptor.OrderEvent{
-			OrderID:  binary.BigEndian.Uint64(buf[0:8]),
-			Price:    binary.BigEndian.Uint64(buf[8:16]),
-			Quantity: binary.BigEndian.Uint64(buf[16:24]),
-			Side:     disruptor.Side(buf[24]),
+		// 3. Confirmação: espera o journal (group commit) e monta os ACKs em ordem.
+		for i := range batch {
+			p := &batch[i]
+			if p.ack == AckOK {
+				if err := s.ingress.Confirm(p.event, p.seq); err != nil {
+					log.Printf("❌ ordem %d não confirmada: %v", p.event.OrderID, err)
+					p.ack = AckRejected
+					fatal = true
+				}
+			}
+			out = append(out, p.ack)
+			if p.ack == AckRejected {
+				break // nada depois de uma recusa é confirmado; a conexão será encerrada
+			}
 		}
 
-		// Valida, deduplica, publica e espera o journal (group commit: muitas
-		// conexões esperando ao mesmo tempo dividem um único fsync).
-		var ack byte
-		switch err := s.ingress.Submit(event); {
-		case err == nil:
-			ack = AckOK
-		case errors.Is(err, ingest.ErrInvalidOrder):
-			ack = AckInvalid
-		case errors.Is(err, ingest.ErrDuplicateOrder):
-			ack = AckDuplicate
-		default:
-			log.Printf("❌ ordem %d não confirmada: %v", event.OrderID, err)
-			conn.Write(acks[AckRejected])
-			return
-		}
-
-		if _, err := conn.Write(acks[ack]); err != nil {
+		// 4. Um único write com todos os ACKs do lote.
+		if _, err := conn.Write(out); err != nil || fatal {
 			return
 		}
 	}

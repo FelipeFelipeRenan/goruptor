@@ -33,7 +33,7 @@ var journalModes = []struct {
 	{"nosync", disruptor.JournalOptions{SyncInterval: time.Hour}},
 }
 
-func stopStack(b *testing.B, s *stack) {
+func stopStack(b testing.TB, s *stack) {
 	b.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
