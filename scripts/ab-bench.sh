@@ -9,7 +9,8 @@
 #     é o que mais explica diferenças entre rodadas;
 #   - no fim imprime uma tabela e grava o TSV em bench-results/.
 #
-# Pré-requisito: `make setup` feito UMA vez (MiniStack com SQS + Postgres no ar).
+# Pré-requisito: `make setup` feito UMA vez (MiniStack com SQS + Postgres no ar; o script confere as portas
+# 15432 e 4566 antes de começar, PREFLIGHT=0 desliga).
 #
 # Uso (veja também `make ab`):
 #   scripts/ab-bench.sh                              # main vs perf/bottlenecks, 2 rodadas
@@ -125,6 +126,10 @@ main() {
   [[ -d .git ]] || cd "$(git rev-parse --show-toplevel)" || die "rode dentro do repositório"
   command -v go >/dev/null || die "go não encontrado"
   for p in 3000 3001; do port_open $p && die "porta $p já está em uso (pare o servidor: Ctrl+C no make run)"; done
+  if [[ ${PREFLIGHT:-1} == 1 ]]; then
+    port_open 15432 || die "Postgres (porta 15432) fora do ar. Rode 'docker ps'; se o MiniStack caiu: make up (e make infra se o RDS sumiu), ou make setup."
+    port_open 4566 || die "SQS/MiniStack (porta 4566) fora do ar. Rode 'make up' (ou make setup)."
+  fi
 
   local stamp res_dir tsv
   stamp=$(date +%Y%m%d-%H%M%S)
