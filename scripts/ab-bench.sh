@@ -19,6 +19,7 @@
 #   GORUPTOR_WAL_SYNC=200ms scripts/ab-bench.sh      # sem fsync por lote (isola o disco)
 #
 # Variáveis: REFS, ROUNDS (2), LOAD=auto|cannon|loadtest, N (100000), C (150 cannon / 16 loadtest),
+#            WINDOW (loadtest: ordens em voo por conexão, 32; 0 = rajada),
 #            PG_CONTAINER (ministack-rds-goruptor-db), MIN_FREE_MB (1024; espaço mínimo no container do
 #            Postgres, 0 desliga), GORUPTOR_WAL_SYNC (repassada ao servidor).
 set -uo pipefail
@@ -39,6 +40,10 @@ cannon_metric() { # <Min|Mean|p50|p99> < relatório do cannon  -> ex.: 1.48ms
 cannon_rps()  { awk '/Requests\/sec/ {print $2; exit}'; }
 cannon_409()  { awk '/HTTP 409/ {print $3; f=1; exit} END {if(!f) print 0}'; }
 loadtest_rate() { awk '/ordens confirmadas\/s/ {print $2; exit}'; }
+loadtest_lat() { # <min|mean|p50|p95|p99|max> < saída do dma-loadtest  -> ex.: 1.23ms
+  local v; v=$(sed -nE "s/.*latência.* $1=([0-9.]+).*/\1/p" | head -1)
+  [[ -n $v ]] && echo "${v}ms" || echo "-"
+}
 dd_ms_per_write() { # <writes> < saída do dd -> ms por escrita síncrona
   local w=$1 secs
   secs=$(strip_ansi | sed -nE 's/.*copied, ([0-9.,]+) s.*/\1/p' | tail -1 | tr ',' '.')
@@ -55,6 +60,11 @@ selftest() {
   [[ $(cannon_409 <<<"$r") == 4793 ]] || { echo "falhou 409"; exit 1; }
   [[ $(cannon_409 <<<"sem nada") == 0 ]] || { echo "falhou 409 vazio"; exit 1; }
   [[ $(loadtest_rate <<<"🚀 52311 ordens confirmadas/s") == 52311 ]] || { echo "falhou loadtest"; exit 1; }
+  local lt='⏱️ latência (ms): min=0.50 mean=1.25 p50=1.00 p95=3.10 p99=4.20 max=9.00  (window=32 por conexão)'
+  [[ $(loadtest_lat min <<<"$lt") == 0.50ms ]] || { echo "falhou lat min"; exit 1; }
+  [[ $(loadtest_lat p99 <<<"$lt") == 4.20ms ]] || { echo "falhou lat p99"; exit 1; }
+  [[ $(loadtest_lat mean <<<"$lt") == 1.25ms ]] || { echo "falhou lat mean"; exit 1; }
+  [[ $(loadtest_lat p50 <<<"sem latência") == - ]] || { echo "falhou lat vazio"; exit 1; }
   [[ $(dd_ms_per_write 500 <<<"2048000 bytes (2.0 MB, 2.0 MiB) copied, 2.5 s, 819 kB/s") == 5.00 ]] || { echo "falhou dd"; exit 1; }
   echo "selftest ok"
 }
@@ -105,7 +115,7 @@ prepare_worktree() { # <ref> <dir>
   git worktree add --detach -f "$2" "$1" >/dev/null 2>&1 \
     || git worktree add --detach -f "$2" "origin/$1" >/dev/null 2>&1 \
     || die "ref '$1' não encontrada (git branch -a)"
-  ( cd "$2" && go build -o goruptor-server.bin ./cmd/goruptor-server && go build -o dma-loadtest.bin ./cmd/dma-loadtest ) \
+  ( cd "$2" && go build -o goruptor-server.bin ./cmd/goruptor-server ) \
     || die "falha ao compilar '$1'"
 }
 
@@ -126,9 +136,10 @@ run_load() { # <dir> <arquivo de saída>  -> escreve o relatório; devolve via v
     done
   else
     local c=${C:-16} rep
-    ( cd "$dir" && ./dma-loadtest.bin -n "$N" -c "$c" ) 2>&1 | strip_ansi >"$out.TCP"
+    "$LT_BIN" -n "$N" -c "$c" -window "${WINDOW:-32}" 2>&1 | strip_ansi >"$out.TCP"
     rep=$(cat "$out.TCP")
-    printf 'TCP|%s|-|-|-|-\n' "$(loadtest_rate <<<"$rep")" >>"$out.rows"
+    printf 'TCP|%s|%s|%s|%s|-\n' "$(loadtest_rate <<<"$rep")" "$(loadtest_lat min <<<"$rep")" \
+      "$(loadtest_lat mean <<<"$rep")" "$(loadtest_lat p99 <<<"$rep")" >>"$out.rows"
   fi
 }
 
@@ -154,6 +165,11 @@ main() {
   tsv="$res_dir/summary.tsv"
   WT_ROOT=$(mktemp -d)
   trap cleanup EXIT INT TERM
+
+  # O cliente de carga é o do SEU checkout, o mesmo para todas as versões: o que muda
+  # entre as rodadas é só o servidor.
+  LT_BIN="$WT_ROOT/dma-loadtest.bin"
+  go build -o "$LT_BIN" ./cmd/dma-loadtest || die "falha ao compilar o dma-loadtest"
 
   echo "🔧 Compilando as versões: $REFS"
   local ref safe
