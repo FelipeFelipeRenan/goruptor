@@ -42,15 +42,12 @@ type EventHandler interface {
 //   - o motor nunca processa um evento que ainda não esteja no journal;
 //   - WaitDurable(seq) só retorna nil depois que o evento está no journal.
 type RingBuffer struct {
-	events  []OrderEvent
+	slots   []slot
 	bitMask uint64
 
 	// Espaçamento para isolar os cursores na cache L1/L2
 	_           [8]uint64
 	claimCursor uint64 // Cursor onde os produtores tiram a "senha" instantaneamente
-
-	_              [8]uint64
-	producerCursor uint64 // Cursor que confirma que a escrita na RAM terminou
 
 	_              [8]uint64
 	consumerCursor uint64 // Cursor onde o motor de matching está a ler
@@ -78,6 +75,22 @@ type RingBuffer struct {
 	failErr error // protegido por durMu
 }
 
+// slot é uma posição do anel: o evento e o carimbo de publicação.
+//
+// published == seq+1 significa "o evento da sequência seq já foi escrito aqui".
+// (seq+1, e não seq, para que o valor zero inicial nunca pareça publicado, e o
+// carimbo da volta anterior, seq-capacidade+1, nunca seja confundido com o atual.)
+//
+// Cada produtor carimba o PRÓPRIO slot, sem esperar os outros: o consumidor e o
+// journaler percorrem os carimbos em ordem e param no primeiro que faltar. Isso
+// substitui o antigo "commit linearizado" (CAS em um cursor único, em que o
+// produtor da sequência N esperava o N-1), que formava um comboio sob muitos
+// produtores: uma goroutine preemptida atrasava todas as seguintes.
+type slot struct {
+	event     OrderEvent
+	published uint64
+}
+
 // NewRingBuffer inicializa o anel (A capacidade TEM de ser potência de 2).
 // Sem journal: o motor consome assim que o evento é publicado.
 func NewRingBuffer(size uint64) *RingBuffer {
@@ -87,7 +100,7 @@ func NewRingBuffer(size uint64) *RingBuffer {
 	}
 
 	b := &RingBuffer{
-		events:        make([]OrderEvent, size),
+		slots:         make([]slot, size),
 		bitMask:       size - 1,
 		consumerDone:  make(chan struct{}),
 		journalerDone: make(chan struct{}),
@@ -126,7 +139,7 @@ func (b *RingBuffer) Publish(event OrderEvent) (uint64, error) {
 
 	// 2. CONTROLO DE FLUXO (Backpressure)
 	// Se o anel der a volta e bater no consumidor, a goroutine cede a CPU.
-	capacity := uint64(len(b.events))
+	capacity := uint64(len(b.slots))
 	for seq-atomic.LoadUint64(&b.consumerCursor) >= capacity {
 		if atomic.LoadUint32(&b.failedFlag) == 1 {
 			return 0, b.journalFailure()
@@ -137,17 +150,13 @@ func (b *RingBuffer) Publish(event OrderEvent) (uint64, error) {
 	// 3. ESCRITA CONCORRENTE
 	// Como 'seq' é único para cada goroutine, centenas delas podem escrever
 	// em paralelo absoluto nas suas posições isoladas da memória RAM.
-	b.events[seq&b.bitMask] = event
+	sl := &b.slots[seq&b.bitMask]
+	sl.event = event
 
-	// 4. COMMIT LINEARIZADO (Spinlock de Publicação)
-	// Garante que o consumidor não tenta ler a sequência 10 se a goroutine da
-	// sequência 9 ainda não acabou de gravar os dados.
-	for !atomic.CompareAndSwapUint64(&b.producerCursor, seq, seq+1) {
-		if atomic.LoadUint32(&b.failedFlag) == 1 {
-			return 0, b.journalFailure()
-		}
-		runtime.Gosched()
-	}
+	// 4. PUBLICAÇÃO
+	// O carimbo (store atômico) vem depois da escrita do evento, então quem
+	// enxerga o carimbo enxerga o evento. Nenhum produtor espera outro aqui.
+	atomic.StoreUint64(&sl.published, seq+1)
 	return seq, nil
 }
 
@@ -170,6 +179,14 @@ func (b *RingBuffer) WaitDurable(seq uint64) error {
 	return nil
 }
 
+// consumable diz se o motor já pode processar a sequência seq.
+func (b *RingBuffer) consumable(seq uint64, journaled bool) bool {
+	if journaled {
+		return seq < atomic.LoadUint64(&b.journalCursor)
+	}
+	return atomic.LoadUint64(&b.slots[seq&b.bitMask].published) == seq+1
+}
+
 // StartConsumer roda o loop do motor. Bloqueia até Close (após drenar tudo)
 // ou até o journal falhar (após processar tudo que já estava em disco).
 func (b *RingBuffer) StartConsumer(handler EventHandler) {
@@ -183,13 +200,7 @@ func (b *RingBuffer) StartConsumer(handler EventHandler) {
 	for {
 		// 1. Barreira: espera o evento estar publicado (e, com journal, gravado).
 		for {
-			var limit uint64
-			if journaled {
-				limit = atomic.LoadUint64(&b.journalCursor)
-			} else {
-				limit = atomic.LoadUint64(&b.producerCursor)
-			}
-			if nextSequence < limit {
+			if b.consumable(nextSequence, journaled) {
 				break
 			}
 			if atomic.LoadUint32(&b.failedFlag) == 1 {
@@ -202,7 +213,7 @@ func (b *RingBuffer) StartConsumer(handler EventHandler) {
 		}
 
 		// 2. Pega a bala da câmara
-		event := b.events[nextSequence&b.bitMask]
+		event := b.slots[nextSequence&b.bitMask].event
 
 		// 3. Dispara a Regra de Negócio (O Motor de Matching)
 		handler.OnEvent(event, nextSequence)
@@ -244,9 +255,21 @@ func (b *RingBuffer) StartJournaler() {
 	}
 
 	for {
-		avail := atomic.LoadUint64(&b.producerCursor)
+		// Junta, em ordem, os eventos já publicados (até maxBatch). Para no
+		// primeiro carimbo que faltar: um produtor mais lento só atrasa o que
+		// vem depois dele, e só até ele terminar de escrever.
+		batch = batch[:0]
+		end := next
+		for end-next < maxBatch {
+			sl := &b.slots[end&b.bitMask]
+			if atomic.LoadUint64(&sl.published) != end+1 {
+				break
+			}
+			batch = append(batch, sl.event)
+			end++
+		}
 
-		if next >= avail {
+		if end == next {
 			// Ocioso: fsync pendente do modo por intervalo e checagem de encerramento.
 			if dirty && time.Since(lastSync) >= b.jopts.SyncInterval && !syncNow() {
 				return
@@ -266,15 +289,6 @@ func (b *RingBuffer) StartJournaler() {
 			continue
 		}
 		idleSpins = 0
-
-		end := avail
-		if end-next > maxBatch {
-			end = next + maxBatch
-		}
-		batch = batch[:0]
-		for s := next; s < end; s++ {
-			batch = append(batch, b.events[s&b.bitMask])
-		}
 
 		if err := b.journal.Append(batch); err != nil {
 			b.fail(err)

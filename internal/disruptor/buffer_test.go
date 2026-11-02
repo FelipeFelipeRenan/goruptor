@@ -21,7 +21,7 @@ func BenchmarkRingBuffer_Publish(b *testing.B) {
 	var isDone uint32
 	go func() {
 		for atomic.LoadUint32(&isDone) == 0 {
-			pc := atomic.LoadUint64(&rb.producerCursor)
+			pc := atomic.LoadUint64(&rb.claimCursor)
 			atomic.StoreUint64(&rb.consumerCursor, pc)
 
 			runtime.Gosched()
