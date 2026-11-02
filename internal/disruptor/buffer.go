@@ -20,6 +20,12 @@ var (
 	ErrJournalFailed = errors.New("disruptor: falha no journal")
 )
 
+// Espera adaptativa do motor e do journaler quando não há trabalho.
+const (
+	idleSpinLimit = 256
+	idleSleep     = 50 * time.Microsecond
+)
+
 // closedBit marca o claimCursor como fechado. Ver Close.
 const closedBit = uint64(1) << 63
 
@@ -199,6 +205,7 @@ func (b *RingBuffer) StartConsumer(handler EventHandler) {
 	// Loop Infinito do Consumidor
 	for {
 		// 1. Barreira: espera o evento estar publicado (e, com journal, gravado).
+		idleSpins := 0
 		for {
 			if b.consumable(nextSequence, journaled) {
 				break
@@ -209,7 +216,16 @@ func (b *RingBuffer) StartConsumer(handler EventHandler) {
 			if atomic.LoadUint32(&b.closedFlag) == 1 && nextSequence >= atomic.LoadUint64(&b.finalSeq) {
 				return // fechado e totalmente drenado
 			}
-			runtime.Gosched()
+			// Espera adaptativa: sob tráfego o evento chega em nanossegundos
+			// (só cede a CPU); ocioso, dorme em vez de queimar um núcleo inteiro
+			// (antes: ~100% de CPU sem nenhuma ordem). Custo: até ~50 µs extras
+			// para o PRIMEIRO evento depois de um período parado.
+			idleSpins++
+			if idleSpins < idleSpinLimit {
+				runtime.Gosched()
+			} else {
+				time.Sleep(idleSleep)
+			}
 		}
 
 		// 2. Pega a bala da câmara
@@ -281,10 +297,10 @@ func (b *RingBuffer) StartJournaler() {
 				return
 			}
 			idleSpins++
-			if idleSpins < 256 {
+			if idleSpins < idleSpinLimit {
 				runtime.Gosched()
 			} else {
-				time.Sleep(50 * time.Microsecond) // sem trânsito: não queimar CPU
+				time.Sleep(idleSleep) // sem trânsito: não queimar CPU
 			}
 			continue
 		}
