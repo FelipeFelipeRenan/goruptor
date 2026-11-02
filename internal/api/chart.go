@@ -31,8 +31,7 @@ func (s *Server) handleGetCandles(c *fiber.Ctx) error {
 		ORDER BY time ASC;
 	`
 
-	// SE O SEU BATCHER ESTIVER NIL AQUI, VAI DAR PANIC (Verifique seu main.go!)
-	rows, err := s.batcher.DB.Query(query) // Lembre de usar o getter apropriado pro DB
+	rows, err := s.db.Query(query)
 	if err != nil {
 		log.Printf("❌ Erro na Query SQL: %v", err)
 		return c.Status(500).SendString("Erro no banco")
