@@ -58,3 +58,6 @@ override.tf.json
 
 # WAL local (estado do motor; nunca versionar)
 goruptor_journal.jsonl*
+
+# resultados de scripts/ab-bench.sh
+bench-results/

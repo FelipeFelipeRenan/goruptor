@@ -112,6 +112,7 @@ make test       # todos os testes, com o race detector
 make bench      # benchmarks (anel, motor, WAL, TCP ponta a ponta); veja docs/PERFORMANCE.md
 make loadtest   # carga no TCP (com o servidor rodando): ordens confirmadas/s
 make check      # o mesmo que a CI: gofmt + vet + testes
+make ab         # compara versões (ex.: REFS="main perf/bottlenecks") sob a mesma carga, alternadas, sem nuke/setup
 ```
 
 Alguns testes que valem a leitura:

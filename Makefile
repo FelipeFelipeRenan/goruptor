@@ -8,7 +8,7 @@ SERVER_TCP  := 127.0.0.1:3001
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup up down infra nuke build run test bench fmt vet check loadtest clean \
+.PHONY: help setup up down infra nuke build run test bench fmt vet check loadtest ab clean \
 		cannon-buy cannon-sell cannon-peak cannon-peak-buy cannon-peak-sell \
 		cannon-dma-buy cannon-dma-sell cannon-dma-peak
 
@@ -72,6 +72,9 @@ check: ## O mesmo que a CI: formatação, vet e testes
 
 loadtest: ## Carga no TCP binário com o cliente Go (confirmadas/s). Ex.: make loadtest N=200000 C=32
 	go run ./cmd/dma-loadtest -addr $(SERVER_TCP) -n $(or $(N),100000) -c $(or $(C),16)
+
+ab: ## Compara versões sob a mesma carga, alternadas (sem nuke/setup). Ex.: make ab REFS="main perf/bottlenecks" ROUNDS=3
+	REFS="$(or $(REFS),main perf/bottlenecks)" ROUNDS=$(or $(ROUNDS),2) LOAD=$(or $(LOAD),auto) N=$(or $(N),100000) scripts/ab-bench.sh
 
 cannon-buy: ## [cannon] 10.000 ordens de COMPRA via HTTP
 	cannon -u $(SERVER_HTTP)/api/orders -c 10000 -w 20 -X POST -H "Content-Type: application/json" --body '{"order_id": {{number}}, "price": {{number}}, "quantity": 1, "side": "BUY"}'
