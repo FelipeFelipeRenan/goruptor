@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -67,6 +67,12 @@ func NewBatcher(connStr string, batchSize int) (*Batcher, error) {
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("criando a tabela trade_history: %w", err)
+	}
+
+	// Os candles filtram por janela de tempo; sem o índice cada consulta varre a tabela.
+	if _, err = db.Exec(`CREATE INDEX IF NOT EXISTS trade_history_created_at_idx ON trade_history (created_at)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("criando o índice de trade_history: %w", err)
 	}
 
 	b := NewBatcherWithSink(postgresSink(db), batchSize, defaultFlushInterval)
@@ -181,26 +187,46 @@ func (b *Batcher) flush(batch []disruptor.OrderEvent) {
 // postgresSink devolve o sink que faz o INSERT em massa na tabela trade_history.
 func postgresSink(db *sql.DB) BatchSink {
 	return func(ctx context.Context, batch []disruptor.OrderEvent) error {
-		valueStrings := make([]string, 0, len(batch))
-		valueArgs := make([]interface{}, 0, len(batch)*4)
-
-		i := 1
-		for _, order := range batch {
-			valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d)", i, i+1, i+2, i+3))
-
-			sideStr := "BUY"
-			if order.Side == disruptor.Sell {
-				sideStr = "SELL"
-			}
-
-			valueArgs = append(valueArgs, order.OrderID, order.Price, order.Quantity, sideStr)
-			i += 4
-		}
-
-		stmt := fmt.Sprintf("INSERT INTO trade_history (order_id, price, quantity, side) VALUES %s ON CONFLICT DO NOTHING",
-			strings.Join(valueStrings, ","))
-
-		_, err := db.ExecContext(ctx, stmt, valueArgs...)
+		stmt, args := buildInsert(batch)
+		_, err := db.ExecContext(ctx, stmt, args...)
 		return err
 	}
+}
+
+// buildInsert monta o INSERT em massa (4 parâmetros por ordem).
+// Constrói o texto com um único buffer e strconv (antes: um fmt.Sprintf por
+// linha, ~7,5 mil alocações por lote de 1000).
+func buildInsert(batch []disruptor.OrderEvent) (string, []interface{}) {
+	const head = "INSERT INTO trade_history (order_id, price, quantity, side) VALUES "
+	const tail = " ON CONFLICT DO NOTHING"
+
+	buf := make([]byte, 0, len(head)+len(tail)+len(batch)*24)
+	buf = append(buf, head...)
+	valueArgs := make([]interface{}, 0, len(batch)*4)
+
+	i := 1
+	for _, order := range batch {
+		if i > 1 {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, "($"...)
+		buf = strconv.AppendInt(buf, int64(i), 10)
+		buf = append(buf, ", $"...)
+		buf = strconv.AppendInt(buf, int64(i+1), 10)
+		buf = append(buf, ", $"...)
+		buf = strconv.AppendInt(buf, int64(i+2), 10)
+		buf = append(buf, ", $"...)
+		buf = strconv.AppendInt(buf, int64(i+3), 10)
+		buf = append(buf, ')')
+
+		sideStr := "BUY"
+		if order.Side == disruptor.Sell {
+			sideStr = "SELL"
+		}
+
+		valueArgs = append(valueArgs, order.OrderID, order.Price, order.Quantity, sideStr)
+		i += 4
+	}
+	buf = append(buf, tail...)
+	return string(buf), valueArgs
 }

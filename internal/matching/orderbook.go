@@ -3,7 +3,6 @@ package matching
 import (
 	"container/heap"
 	"container/list"
-	"sort"
 	"sync"
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/cloud"
@@ -295,39 +294,56 @@ func (ob *OrderBook) matchSell(order Order) {
 	}
 }
 
+// SnapshotDepth é quantos níveis de cada lado o snapshot devolve.
+const SnapshotDepth = 10
+
+// GetSnapshot devolve os melhores SnapshotDepth níveis de cada lado.
+//
+// Custo constante (~1000 comparações), independente do tamanho do livro. Antes,
+// copiava e ordenava TODOS os preços sob o RLock (38 ms com 100 mil níveis, a
+// cada 200 ms), e o motor, que precisa do Lock, ficava parado esse tempo todo.
 func (ob *OrderBook) GetSnapshot() BookSnapshot {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
 	snap := BookSnapshot{
-		Asks: make([]OrderSnapshot, 0),
-		Bids: make([]OrderSnapshot, 0),
+		Asks: make([]OrderSnapshot, 0, SnapshotDepth),
+		Bids: make([]OrderSnapshot, 0, SnapshotDepth),
 	}
-
-	askPrices := make([]uint64, 0, len(ob.asksMap))
-	for price := range ob.asksMap {
-		askPrices = append(askPrices, price)
-	}
-
-	sort.Slice(askPrices, func(i, j int) bool { return askPrices[i] < askPrices[j] })
-
-	for i := 0; i < len(askPrices) && i < 10; i++ {
-		price := askPrices[i]
+	for _, price := range bestPrices(*ob.askPrices, SnapshotDepth, func(a, b uint64) bool { return a < b }) {
 		snap.Asks = append(snap.Asks, OrderSnapshot{Price: price, Quantity: ob.asksMap[price].TotalVolume})
 	}
-
-	bidPrices := make([]uint64, 0, len(ob.bidsMap))
-	for price := range ob.bidsMap {
-		bidPrices = append(bidPrices, price)
-	}
-	sort.Slice(bidPrices, func(i, j int) bool { return bidPrices[i] > bidPrices[j] })
-
-	for i := 0; i < len(bidPrices) && i < 10; i++ {
-		price := bidPrices[i]
+	for _, price := range bestPrices(*ob.bidPrices, SnapshotDepth, func(a, b uint64) bool { return a > b }) {
 		snap.Bids = append(snap.Bids, OrderSnapshot{Price: price, Quantity: ob.bidsMap[price].TotalVolume})
 	}
-
 	return snap
+}
 
+// bestPrices devolve, em ordem, os k melhores preços de um heap binário
+// (better(a, b) = "a é melhor que b"; é a mesma ordem do heap).
+//
+// Em um heap binário, um elemento na profundidade d tem d ancestrais melhores
+// que ele; logo o k-ésimo melhor está na profundidade <= k-1, ou seja, nas
+// primeiras 2^k - 1 posições do array. Basta olhar essa janela.
+func bestPrices(h []uint64, k int, better func(a, b uint64) bool) []uint64 {
+	window := len(h)
+	if k < 62 && window > (1<<k)-1 {
+		window = (1 << k) - 1
+	}
+	out := make([]uint64, 0, k)
+	for _, p := range h[:window] {
+		if len(out) == k && !better(p, out[k-1]) {
+			continue
+		}
+		if len(out) < k {
+			out = append(out, p)
+		} else {
+			out[k-1] = p
+		}
+		for i := len(out) - 1; i > 0 && better(out[i], out[i-1]); i-- { // insertion sort
+			out[i], out[i-1] = out[i-1], out[i]
+		}
+	}
+	return out
 }
 
 func (ob *OrderBook) SetRestoreMode(restoring bool) {

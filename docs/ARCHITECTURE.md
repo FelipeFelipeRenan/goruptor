@@ -37,7 +37,7 @@ Uma ordem passa por seis passos (`internal/ingest`, usado por HTTP e TCP):
 | 1 | A ordem do WAL é a ordem do motor | Só o journaler escreve o WAL, lendo o anel por sequência | `TestJournal_WALOrderEqualsEngineOrder` |
 | 2 | Replay do WAL reproduz o livro em memória | Consequência do 1 | `TestRecovery_ConcurrentProducersReplayReproducesLiveBook` |
 | 3 | ACK ⇒ ordem em disco | `WaitDurable` só retorna após o `fsync` | `TestJournal_AckImpliesDurable`, `TestRecovery_AckedOrdersAreAlwaysInTheFile` |
-| 4 | O motor nunca passa do journal | O consumidor é limitado por `journalCursor`, não por `producerCursor` | `TestJournal_EngineNeverAheadOfJournal` |
+| 4 | O motor nunca passa do journal | O consumidor é limitado por `journalCursor` | `TestJournal_EngineNeverAheadOfJournal` |
 | 5 | Falha de disco para tudo, sem travar ninguém | Fail-stop: todos os spins checam `failedFlag` | `TestJournal_FailureIsFailStopAndNeverHangs` |
 | 6 | Ordem aceita no shutdown nunca se perde | `Close` fecha a reserva atomicamente | `TestShutdown_EveryAcceptedOrderIsJournaledAndProcessed` |
 | 7 | Nenhuma ordem confirmada se perde num desligamento sob carga | Sequência ordenada de `app.Components.Shutdown` | `TestGracefulShutdown_UnderLoad_NothingConfirmedIsLost` |
@@ -52,10 +52,14 @@ corrida diferente da que decidia a ordem do motor, então os invariantes 1 e 2 n
 Inspirado no LMAX Disruptor, com vários produtores e um único consumidor de negócio.
 
 - **Cursores** em linhas de cache separadas (padding) para evitar *false sharing*:
-  `claimCursor` (reserva), `producerCursor` (escrita concluída), `journalCursor` (já no WAL), `consumerCursor` (motor).
-- **Reserva**: `seq = claimCursor.Add(1) - 1`. Cada produtor escreve no próprio slot em paralelo; depois publica
-  em ordem com um CAS em `producerCursor`.
+  `claimCursor` (reserva), `journalCursor` (já no WAL), `consumerCursor` (motor).
+- **Reserva**: `seq = claimCursor.Add(1) - 1`. Cada produtor escreve no próprio slot em paralelo e o **carimba**
+  (`slot.published = seq+1`), sem esperar nenhum outro produtor. O journaler (e o motor, sem journal) percorrem os
+  carimbos em ordem e param no primeiro que faltar. (Antes havia um CAS encadeado em `producerCursor`: o produtor
+  N esperava o N-1, e sob muitos produtores isso formava um comboio. Ver [PERFORMANCE.md](PERFORMANCE.md).)
 - **Backpressure**: se `seq - consumerCursor >= capacidade`, o produtor cede a CPU (`Gosched`).
+- **Espera ociosa**: motor e journaler giram (`Gosched`) por até 256 tentativas sem trabalho e depois dormem 50 µs,
+  então não ocupam um núcleo sem tráfego.
 - **Fechamento sem corrida**: `Close` soma um bit alto (`closedBit`) ao `claimCursor`. O valor anterior é exatamente
   o número de sequências legítimas; quem reservar depois vê o bit e recebe `ErrClosed`. Não há custo extra no caminho quente.
 - **Fail-stop**: se o journal falhar, `failedFlag` é ligado, os `WaitDurable` acordam com `ErrJournalFailed`, o motor

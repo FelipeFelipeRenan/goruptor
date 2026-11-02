@@ -172,16 +172,27 @@ func (s *Server) broadcastTicker() {
 		case <-ticker.C:
 		}
 
-		snap := s.orderBook.GetSnapshot()
-
+		// Copia a lista de clientes e solta o lock ANTES de escrever na rede: um
+		// cliente lento não pode travar o registro de novos clientes (handleWS).
 		s.mu.Lock()
+		clients := make([]*websocket.Conn, 0, len(s.clients))
 		for client := range s.clients {
+			clients = append(clients, client)
+		}
+		s.mu.Unlock()
+		if len(clients) == 0 {
+			continue // ninguém assistindo: não gasta nem o snapshot
+		}
+
+		snap := s.orderBook.GetSnapshot()
+		for _, client := range clients {
 			if err := client.WriteJSON(snap); err != nil {
 				// Antes, uma falha em Close() encerrava o broadcaster para sempre.
 				client.Close()
+				s.mu.Lock()
 				delete(s.clients, client)
+				s.mu.Unlock()
 			}
 		}
-		s.mu.Unlock()
 	}
 }
