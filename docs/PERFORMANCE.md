@@ -84,6 +84,22 @@ leva ~5 s para reler (antes ~22 s); o WAL continua sem truncamento nem snapshot,
 `buildInsert` usava um `fmt.Sprintf` por linha. Agora usa um buffer único e `strconv`: 584 → 225 µs por 1000 linhas.
 O que sobra de alocações é o boxing dos argumentos exigido pelo `database/sql`. Testado contra a implementação antiga.
 
+## Validação em hardware real
+
+Medido com `make ab` (`scripts/ab-bench.sh`): Ubuntu no WSL2 sobre Windows 11, cliente e servidor na mesma máquina,
+Postgres e SQS no MiniStack, `fsync` de 1,2 a 3,9 ms por escrita síncrona. Duas rodadas alternadas por versão,
+100 mil ordens, todas aceitas e com ACK após o `fsync`.
+
+| Carga | main | perf/bottlenecks |
+|---|---|---|
+| TCP em pipeline (`dma-loadtest`, 16 conexões) | ~2,4 a 2,7 mil ordens/s | **~53 a 58 mil ordens/s** (~22x) |
+| HTTP, 150 clientes, um pedido em voo por conexão | ~18 a 19 mil req/s | ~18 a 19 mil req/s (empate) |
+
+O ganho no TCP não depende da velocidade do disco: a main ficou em ~2,5 mil/s com o disco rápido e com o lento, e a
+perf em ~53 a 58 mil/s nos dois casos. No HTTP o teto é o `fsync`: com ~3,5 ms por escrita, cada ACK espera 1 a 2
+ciclos (~8,5 ms) e 150 clientes dão ~17 mil/s, qualquer que seja o código. Só há ganho onde dá para agrupar mais
+ordens por `fsync` (pipeline, mais conexões). Amostras pequenas (execuções de ~2 s): vale a ordem de grandeza, não o fator exato.
+
 ## Medido e deixado como está
 
 - **Motor de matching** (`container/list` + `container/heap`): ~440 ns e 2 alocações por ordem (~2,2 M ordens/s),
