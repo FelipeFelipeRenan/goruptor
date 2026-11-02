@@ -9,8 +9,9 @@
 //	[24]    Side     uint8   (0 = BUY, 1 = SELL)
 //
 // O servidor responde 1 byte por ordem: 1 = confirmada (já está no WAL em disco),
-// 0 = recusada. Este cliente envia em pipeline, lê os ACKs em paralelo e mede
-// ordens CONFIRMADAS por segundo (não apenas a velocidade de escrita no socket).
+// 2 = inválida, 3 = order_id repetido, 0 = não confirmada. Este cliente envia em
+// pipeline, lê os ACKs em paralelo e mede ordens CONFIRMADAS por segundo (não
+// apenas a velocidade de escrita no socket).
 //
 // Uso:
 //

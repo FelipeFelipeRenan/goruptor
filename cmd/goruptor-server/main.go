@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -9,11 +10,16 @@ import (
 	"time"
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/api"
+	"github.com/FelipeFelipeRenan/goruptor/internal/app"
 	"github.com/FelipeFelipeRenan/goruptor/internal/cloud"
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
+	"github.com/FelipeFelipeRenan/goruptor/internal/ingest"
 	"github.com/FelipeFelipeRenan/goruptor/internal/matching"
 	"github.com/FelipeFelipeRenan/goruptor/internal/storage"
 )
+
+// shutdownTimeout é o tempo máximo para drenar tudo no SIGINT/SIGTERM.
+const shutdownTimeout = 15 * time.Second
 
 func main() {
 	fmt.Println("🚀 Iniciando a Corretora Goruptor...")
@@ -25,7 +31,11 @@ func main() {
 	}
 
 	// 2. Liga o Worker Assíncrono em background
-	go awsPub.Publish()
+	tradesDone := make(chan struct{})
+	go func() {
+		awsPub.Publish() // retorna quando awsPub.Close() esvazia o canal de trades
+		close(tradesDone)
+	}()
 	fmt.Println("☁️  Worker AWS Conectado no SQS local.")
 
 	// 3. Instancia o Motor passando o AWS Publisher
@@ -70,37 +80,61 @@ func main() {
 	if err != nil {
 		log.Fatalf("Falha ao conectar no RDS da AWS: %v", err)
 	}
+
+	// Porta única de entrada de ordens (HTTP e TCP): valida, deduplica e confirma.
+	// Os IDs já presentes no WAL são registrados, para que um reinício não reabra
+	// a porta para ordens duplicadas.
+	ingress := ingest.New(ringBuffer, batcher)
+	for _, evt := range pastEvents {
+		ingress.IDs().Register(evt.OrderID)
+	}
+
 	// LIGAMOS O JOURNALER (só depois do replay: ele começa a gravar eventos novos)
 	go ringBuffer.StartJournaler()
 	// LIGAMOS O MOTOR
 	go ringBuffer.StartConsumer(engineHandler)
 
 	fmt.Println("✅ Motor LMAX Disruptor rodando. Aguardando ordens...\n--- 🔔 PREGÃO ABERTO ---")
-	httpServer := api.NewServer(ringBuffer, book, batcher)
+	httpServer := api.NewServer(ingress, book, batcher.DB)
 	go func() {
 		if err := httpServer.Start(":3000"); err != nil {
 			log.Fatalf("Erro no servidor HTTP: %v", err)
 		}
 	}()
 
-	tcpServer := api.NewTCPServer(ringBuffer, batcher)
+	tcpServer := api.NewTCPServer(ingress)
 	go func() {
 		if err := tcpServer.Start(":3001"); err != nil {
 			log.Fatalf("Erro no servidor TCP: %v", err)
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-
-	// Notifica o canal 'quit' caso receba um SIGINT (Ctrl+C) ou SIGTERM (Docker stop)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	// SIGINT (Ctrl+C) ou SIGTERM (docker stop) cancelam este contexto.
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 
 	fmt.Println("🟢 Servidores a rodar em background. Pressione Ctrl+C para sair.")
+	<-sigCtx.Done()
+	stopSignals() // um segundo Ctrl+C durante o desligamento encerra na hora
 
-	// A main bloqueia aqui eternamente até que um sinal entre no canal
-	<-quit
+	fmt.Println("\n🛑 Sinal recebido! Desligando a Goruptor (drenando ordens em andamento)...")
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
 
-	fmt.Println("\n🛑 Sinal recebido! Desligando os motores da Goruptor...")
+	components := &app.Components{
+		HTTP:        httpServer,
+		TCP:         tcpServer,
+		Ring:        ringBuffer,
+		WAL:         wal,
+		Batcher:     batcher,
+		CloseTrades: awsPub.Close,
+		TradesDone:  tradesDone,
+	}
+	if err := components.Shutdown(ctx); err != nil {
+		log.Printf("Desligamento terminou com erros: %v", err)
+		os.Exit(1)
+	}
+	fmt.Println("👋 Desligamento completo: nenhuma ordem confirmada foi perdida.")
 }
 
 // journalOptionsFromEnv lê GORUPTOR_WAL_SYNC:

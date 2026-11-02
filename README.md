@@ -52,7 +52,7 @@ curl -X POST localhost:3000/api/orders \
 | Porta / rota | Descrição |
 |---|---|
 | `:3000` `GET /` | Dashboard (`web/index.html`) |
-| `:3000` `POST /api/orders` | Envia uma ordem. `202` = confirmada em disco; `503` = **não** confirmada |
+| `:3000` `POST /api/orders` | Envia uma ordem. `202` = confirmada em disco; `400` = ordem inválida; `409` = `order_id` já usado; `503` = **não** confirmada |
 | `:3000` `GET /api/candles` | Candles de 1 min (devolvidos no header `HX-Trigger`, usado pelo HTMX) |
 | `:3000` `GET /ws` | WebSocket: snapshot do livro (10 níveis por lado) a cada 200 ms |
 | `:3000` `/debug/pprof/` | Profiling do Go |
@@ -69,8 +69,32 @@ Cada ordem é um frame de **25 bytes**, big-endian:
 | `16..24` | `Quantity` | `uint64` |
 | `24` | `Side` | `uint8` (`0` = BUY, `1` = SELL) |
 
-O servidor responde **1 byte por ordem**: `1` = confirmada (já está no WAL em disco), `0` = recusada
-(em seguida a conexão é encerrada). Pode-se enviar vários frames em pipeline. Exemplo de cliente: [`cmd/dma-loadtest`](cmd/dma-loadtest/main.go).
+O servidor responde **1 byte por ordem**:
+
+| Resposta | Significado | A conexão |
+|---|---|---|
+| `1` | Confirmada: já está no WAL em disco | continua |
+| `2` | Inválida (`order_id`, `side`, `price` ou `quantity` fora das regras) | continua |
+| `3` | `order_id` já utilizado | continua |
+| `0` | **Não** confirmada (servidor desligando ou disco com falha) | é encerrada |
+
+Pode-se enviar vários frames em pipeline. Exemplo de cliente: [`cmd/dma-loadtest`](cmd/dma-loadtest/main.go).
+
+### Regras de validação
+
+| Campo | Regra |
+|---|---|
+| `order_id` | maior que 0 e **único**: repetir um ID é recusado (HTTP `409`, TCP `3`), inclusive depois de um reinício |
+| `side` | `BUY` ou `SELL` (HTTP, sem diferenciar maiúsculas); `0` ou `1` (TCP) |
+| `price` | de 1 a 10¹⁵ |
+| `quantity` | de 1 a 10⁹ (impede que a soma de um nível de preço estoure `uint64`) |
+
+### Desligamento
+
+`SIGINT`/`SIGTERM` (Ctrl+C, `docker stop`) disparam um desligamento ordenado, com limite de 15 s:
+para de aceitar conexões, termina as ordens em andamento, drena o anel (journaler e motor), fecha o WAL,
+grava o último lote no Postgres e esvazia os trades do SQS. **Toda ordem que recebeu ACK é preservada.**
+Um frame que o servidor ainda não tinha lido não recebe ACK; o cliente sabe que ele não foi aceito.
 
 ### Durabilidade
 
@@ -126,8 +150,7 @@ docs/                documentação de arquitetura
 
 O que ainda falta (ordenado por impacto):
 
-- **Sem validação de entrada**: `side` desconhecido vira BUY; preço e quantidade `0` são aceitos; `order_id` repetido não é detectado (o Postgres descarta em silêncio).
-- **Shutdown não drena**: no `SIGTERM` o processo apenas sai. Ordens já confirmadas estão salvas no WAL, mas o lote pendente do Postgres e os trades pendentes do SQS são perdidos.
+- **O conjunto de `order_id`s cresce sem limite** (~50 MB por milhão de ordens, em memória). Para produção, troque por uma janela de tempo ou um filtro de Bloom.
 - **`trade_history` guarda ordens, não trades**: os candles são calculados com o preço das ordens enviadas, não com o preço de execução.
 - `AccountID`, `AssetID`, `BuyerID` e `SellerID` existem nas structs mas nunca são preenchidos; só há um ativo.
 - Sem cancelamento/modificação de ordens e sem ordens a mercado.

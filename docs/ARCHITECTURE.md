@@ -21,8 +21,9 @@ flowchart LR
     E -->|snapshot a cada 200 ms| WS[WebSocket /ws]
 ```
 
-Uma ordem passa por cinco passos (`internal/api/accept.go`):
+Uma ordem passa por seis passos (`internal/ingest`, usado por HTTP e TCP):
 
+0. **Validação e deduplicação**: regras de campo e `order_id` único (`IDSet`). Ordem inválida ou repetida é recusada antes de tocar no anel.
 1. **Publish**: reserva uma sequência no anel, sem lock (`atomic.Add`).
 2. **Journal**: um estágio dedicado lê o anel **em ordem de sequência**, grava em lote no WAL e faz um `fsync` por lote.
 3. **Motor**: só processa eventos cuja sequência já está no journal.
@@ -39,6 +40,9 @@ Uma ordem passa por cinco passos (`internal/api/accept.go`):
 | 4 | O motor nunca passa do journal | O consumidor é limitado por `journalCursor`, não por `producerCursor` | `TestJournal_EngineNeverAheadOfJournal` |
 | 5 | Falha de disco para tudo, sem travar ninguém | Fail-stop: todos os spins checam `failedFlag` | `TestJournal_FailureIsFailStopAndNeverHangs` |
 | 6 | Ordem aceita no shutdown nunca se perde | `Close` fecha a reserva atomicamente | `TestShutdown_EveryAcceptedOrderIsJournaledAndProcessed` |
+| 7 | Nenhuma ordem confirmada se perde num desligamento sob carga | Sequência ordenada de `app.Components.Shutdown` | `TestGracefulShutdown_UnderLoad_NothingConfirmedIsLost` |
+| 8 | Um `order_id` é executado no máximo uma vez, mesmo com reenvios concorrentes e reinícios | `IDSet` sharded, semeado com o WAL no boot | `TestDuplicateStorm_EachOrderIDExecutesExactlyOnce`, `TestRestart_ReplayedIDsStillRejectedAsDuplicates` |
+| 9 | Ordem inválida nunca chega ao anel nem ao WAL | `ingest.Validate` antes de tudo | `TestSubmit_InvalidNeverTouchesEngineOrIDs` |
 
 Antes do journaler, cada goroutine fazia `wal.Log` e depois `Publish`. A ordem do arquivo era decidida por uma
 corrida diferente da que decidia a ordem do motor, então os invariantes 1 e 2 não valiam, e o ACK saía antes do disco.
@@ -88,9 +92,39 @@ entre elas; no benchmark `BenchmarkPipeline_DurableAck` saem ~30 ordens por `fsy
 - O motor roda em **uma única goroutine**; por isso o hot path não pode fazer I/O (veja o comentário em `handler.go`).
 - Trades saem para o SQS por canal **não bloqueante**: se a fila encher, o trade é descartado em vez de travar o motor.
 
+## Entrada de ordens (`internal/ingest`)
+
+`Ingress.Submit` é a única porta de entrada. Os erros se separam por quem errou:
+
+| Erro | Quem errou | HTTP | TCP |
+|---|---|---|---|
+| `ErrInvalidOrder` | cliente | 400 | `2` |
+| `ErrDuplicateOrder` | cliente | 409 | `3` |
+| `ErrUnavailable` | servidor (desligando / disco falhou) | 503 | `0` + fecha a conexão |
+
+Detalhe do `order_id` quando algo falha no meio do caminho:
+
+- **Falha no `Publish`** (nada entrou no anel): o ID é **liberado**, o cliente pode tentar de novo.
+- **Falha no `WaitDurable`** (resultado ambíguo: pode ou não estar em disco): o ID **continua registrado**, para a ordem
+  não rodar duas vezes se o cliente reenviar. Depois de um reinício, o replay do WAL decide a verdade.
+- **Falha ao arquivar no Postgres**: a ordem já está durável, então continua confirmada; só é logado.
+
+## Desligamento (`internal/app`)
+
+`Components.Shutdown` desliga na ordem em que cada passo depende do anterior:
+
+1. **HTTP e TCP**: param de aceitar e esperam as ordens em andamento (cada uma espera o disco, então recebe resposta de verdade).
+2. **Anel**: o journaler grava e o motor processa tudo que já foi aceito.
+3. **WAL**: flush + `fsync` finais.
+4. **Batcher**: grava o último lote no Postgres.
+5. **Trades do SQS**: só agora o canal é fechado. Fechar antes faria o motor dar `panic` ao enviar num canal fechado; por isso,
+   se o anel não parou dentro do prazo, o canal **não** é fechado.
+
+Um passo que falha não impede os seguintes. Todos recebem o mesmo prazo (`ctx`).
+
 ## Outras peças
 
-- `internal/storage/batcher.go`: grava as ordens confirmadas no Postgres em lotes de 1000 (ou a cada 5 s).
+- `internal/storage/batcher.go`: grava as ordens confirmadas no Postgres em lotes de 1000 (ou a cada 5 s); `Close` faz o flush final.
 - `internal/api`: HTTP (Fiber) e TCP binário; o WebSocket `/ws` envia um snapshot do livro a cada 200 ms.
 - `internal/cloud`: publicador SQS (50 workers).
 - `web/index.html`: dashboard (livro + candles) com HTMX e lightweight-charts.
