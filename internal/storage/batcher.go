@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -188,13 +188,30 @@ func postgresSink(db *sql.DB) BatchSink {
 }
 
 // buildInsert monta o INSERT em massa (4 parâmetros por ordem).
+// Constrói o texto com um único buffer e strconv (antes: um fmt.Sprintf por
+// linha, ~7,5 mil alocações por lote de 1000).
 func buildInsert(batch []disruptor.OrderEvent) (string, []interface{}) {
-	valueStrings := make([]string, 0, len(batch))
+	const head = "INSERT INTO trade_history (order_id, price, quantity, side) VALUES "
+	const tail = " ON CONFLICT DO NOTHING"
+
+	buf := make([]byte, 0, len(head)+len(tail)+len(batch)*24)
+	buf = append(buf, head...)
 	valueArgs := make([]interface{}, 0, len(batch)*4)
 
 	i := 1
 	for _, order := range batch {
-		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d)", i, i+1, i+2, i+3))
+		if i > 1 {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, "($"...)
+		buf = strconv.AppendInt(buf, int64(i), 10)
+		buf = append(buf, ", $"...)
+		buf = strconv.AppendInt(buf, int64(i+1), 10)
+		buf = append(buf, ", $"...)
+		buf = strconv.AppendInt(buf, int64(i+2), 10)
+		buf = append(buf, ", $"...)
+		buf = strconv.AppendInt(buf, int64(i+3), 10)
+		buf = append(buf, ')')
 
 		sideStr := "BUY"
 		if order.Side == disruptor.Sell {
@@ -204,8 +221,6 @@ func buildInsert(batch []disruptor.OrderEvent) (string, []interface{}) {
 		valueArgs = append(valueArgs, order.OrderID, order.Price, order.Quantity, sideStr)
 		i += 4
 	}
-
-	stmt := fmt.Sprintf("INSERT INTO trade_history (order_id, price, quantity, side) VALUES %s ON CONFLICT DO NOTHING",
-		strings.Join(valueStrings, ","))
-	return stmt, valueArgs
+	buf = append(buf, tail...)
+	return string(buf), valueArgs
 }
