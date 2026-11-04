@@ -1,12 +1,9 @@
 package matching
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"math/rand"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -85,7 +82,7 @@ func TestRecovery_ConcurrentProducersReplayReproducesLiveBook(t *testing.T) {
 	const producers, perProducer = 8, 2500
 	total := producers * perProducer
 
-	walPath := filepath.Join(t.TempDir(), "journal.jsonl")
+	walPath := filepath.Join(t.TempDir(), "journal.wal")
 	wal, err := storage.NewWAL(walPath)
 	if err != nil {
 		t.Fatal(err)
@@ -173,7 +170,7 @@ func TestRecovery_ConcurrentProducersReplayReproducesLiveBook(t *testing.T) {
 func TestRecovery_AckedOrdersAreAlwaysInTheFile(t *testing.T) {
 	const producers, perProducer = 6, 1500
 
-	walPath := filepath.Join(t.TempDir(), "journal.jsonl")
+	walPath := filepath.Join(t.TempDir(), "journal.wal")
 	wal, err := storage.NewWAL(walPath)
 	if err != nil {
 		t.Fatal(err)
@@ -224,17 +221,14 @@ func TestRecovery_AckedOrdersAreAlwaysInTheFile(t *testing.T) {
 		before := append([]uint64(nil), acked...) // confirmadas ANTES da leitura
 		mu.Unlock()
 
-		raw, err := os.ReadFile(walPath)
+		// Leitor independente (só leitura): o arquivo pode estar sendo escrito agora,
+		// e uma cauda incompleta é ignorada.
+		onDisk, err := storage.ScanFile(walPath)
 		if err != nil {
 			t.Fatal(err)
 		}
 		inFile := make(map[uint64]bool, len(before))
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		for dec.More() {
-			var e disruptor.OrderEvent
-			if dec.Decode(&e) != nil {
-				break // última linha pode estar sendo escrita agora
-			}
+		for _, e := range onDisk {
 			inFile[e.OrderID] = true
 		}
 		for _, id := range before {

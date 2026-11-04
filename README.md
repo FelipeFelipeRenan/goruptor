@@ -118,7 +118,8 @@ make ab         # compara versões (ex.: REFS="main perf/bottlenecks") sob a mes
 Alguns testes que valem a leitura:
 
 - **Replay determinístico**: 8 produtores concorrentes, WAL real; um livro novo reproduzindo o WAL fica idêntico ao vivo, com os mesmos trades.
-- **Crash em cada byte**: trunca o WAL em todas as posições possíveis e exige recuperação íntegra.
+- **Crash em cada byte**: trunca o WAL em todas as posições possíveis e exige recuperação íntegra (o formato binário tem CRC por registro).
+- **Migração do WAL antigo (JSON)**: convertido na primeira abertura, com o original preservado ao lado e tolerância a queda no meio da migração.
 - **ACK implica em disco**: um leitor independente lê o arquivo durante a carga e confirma que nenhum ACK saiu adiantado.
 - **Falha de disco e shutdown sob carga**: ninguém trava e nenhuma ordem aceita se perde.
 
@@ -142,7 +143,7 @@ cmd/
 internal/
   disruptor/         ring buffer lock-free + estágio de journal (group commit)
   matching/          order book, heaps de preço e handler do motor
-  storage/           WAL (JSON Lines) e batcher do Postgres
+  storage/           WAL binário (registros de 41 bytes com CRC32C) e batcher do Postgres
   api/               HTTP (Fiber), TCP binário e candles
   cloud/             publicador SQS
 infra/               Terraform do ambiente local (SQS + RDS no MiniStack)
@@ -158,7 +159,7 @@ O que ainda falta (ordenado por impacto):
 - **`trade_history` guarda ordens, não trades**: os candles são calculados com o preço das ordens enviadas, não com o preço de execução.
 - `AccountID`, `AssetID`, `BuyerID` e `SellerID` existem nas structs mas nunca são preenchidos; só há um ativo.
 - Sem cancelamento/modificação de ordens e sem ordens a mercado.
-- O WAL nunca é truncado e não há snapshot: o boot reprocessa o histórico inteiro.
+- O WAL nunca é truncado e não há snapshot: o boot reprocessa o histórico inteiro (hoje ~11 milhões de eventos/s no formato binário).
 - Credenciais e endpoints fixos no código, `pprof` e API sem autenticação (aceitável só em ambiente local).
 
 ## Licença

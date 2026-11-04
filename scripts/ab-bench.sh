@@ -69,6 +69,18 @@ selftest() {
   echo "selftest ok"
 }
 
+# Ordens no WAL do servidor: binário (goruptor_journal.wal: 8 + 41 bytes por ordem) ou, nas
+# versões antigas, JSON Lines (goruptor_journal.jsonl: uma linha por ordem).
+wal_orders() { # <dir>
+  if [[ -f $1/goruptor_journal.wal ]]; then
+    awk -v s="$(stat -c %s "$1/goruptor_journal.wal")" 'BEGIN {print int((s-8)/41)}'
+  elif [[ -f $1/goruptor_journal.jsonl ]]; then
+    wc -l <"$1/goruptor_journal.jsonl"
+  else
+    echo 0
+  fi
+}
+
 # ---- infraestrutura ----
 die() { echo "❌ $*" >&2; exit 1; }
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
@@ -187,7 +199,7 @@ main() {
       safe=${ref//\//_}; dir="$WT_ROOT/$safe"; out="$res_dir/r${round}_${safe}"
       echo "▶️  rodada $round/$ROUNDS — $ref"
 
-      rm -f "$dir/goruptor_journal.jsonl" "$out.rows"
+      rm -f "$dir"/goruptor_journal.* "$out.rows"
       truncate_pg
       free=$(pg_free_mb)
       if [[ -n $free ]] && (( free < ${MIN_FREE_MB:-1024} )); then
@@ -208,7 +220,7 @@ main() {
 
       run_load "$dir" "$out"
       stop_server
-      wal=$(wc -l <"$dir/goruptor_journal.jsonl" 2>/dev/null || echo 0)
+      wal=$(wal_orders "$dir")
 
       local side rps mn mean p99 c409
       while IFS='|' read -r side rps mn mean p99 c409; do

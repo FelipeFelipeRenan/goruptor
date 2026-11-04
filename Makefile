@@ -2,7 +2,7 @@
 
 BINARY_NAME := goruptor-server
 MAIN_PKG    := ./cmd/goruptor-server
-WAL_FILE    := goruptor_journal.jsonl
+WAL_FILE    := goruptor_journal.wal
 SERVER_HTTP := http://localhost:3000
 SERVER_TCP  := 127.0.0.1:3001
 
@@ -114,6 +114,6 @@ cannon-dma-peak: cannon-dma-sell cannon-dma-buy ## [cannon] pico de venda + comp
 # ---------------------------------------------------------------- limpeza
 
 clean: down ## Para o Docker e apaga o WAL e os binários
-	rm -f $(WAL_FILE)
+	rm -f $(WAL_FILE)* goruptor_journal.jsonl*
 	rm -rf bin
 	@echo "🧹 Ambiente limpo."
