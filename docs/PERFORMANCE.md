@@ -71,13 +71,28 @@ O consumidor do motor fazia `Gosched()` em laço, ocupando ~101% de um núcleo s
 **Custo:** o primeiro evento depois de um período parado pode esperar até ~1 ms (pior caso medido: 1,2 ms).
 Sob tráfego contínuo o caminho quente não muda. Testes: `TestIdle_*`.
 
-## 5. Replay do WAL (boot)
+## 5. Replay do WAL (boot) e formato binário
 
-`ReadAll`/`repairTail` usavam `json.Decoder` (reflection, 1 alocação por evento). Linhas no formato do próprio encoder
-agora são decodificadas à mão; qualquer coisa fora do padrão cai no `json.Decoder` a partir dali, que decide o que
-é íntegro. Os testes comparam o resultado com o decoder antigo em arquivos válidos, 5 mil arquivos corrompidos
-aleatoriamente, casos-limite e fuzz. 463 mil → 1,9 milhão de eventos/s. Um WAL de 10 milhões de eventos
-leva ~5 s para reler (antes ~22 s); o WAL continua sem truncamento nem snapshot, então esse custo ainda cresce.
+**Primeiro passo:** `ReadAll`/`repairTail` usavam `json.Decoder` (reflection, 1 alocação por evento). Um decodificador
+à mão para as linhas no formato do próprio encoder, com fallback para o `json.Decoder`, subiu o replay de 463 mil para
+1,9 milhão de eventos/s (testado contra o decoder antigo em arquivos corrompidos e fuzz).
+
+**Segundo passo:** o WAL passou de JSON Lines para um **formato binário** de registros fixos de 41 bytes com CRC32C
+(ver [ARCHITECTURE.md](ARCHITECTURE.md#wal-internalstorage)). Medido no mesmo ambiente (2 vCPUs, mediana de 3):
+
+| | JSON (decodificador à mão) | Binário |
+|---|---|---|
+| `Append`, CPU por evento (sem `fsync`) | 432 ns (3,1 M eventos/s) | **92 ns (24 M eventos/s)** |
+| Replay (`ReadAll`, 200 mil eventos) | 2,2 M eventos/s | **17,4 M eventos/s** |
+| Boot (`NewWAL` + `ReadAll`, 500 mil eventos) | 1,26 M eventos/s | **11,5 M eventos/s** |
+| Tamanho em disco por evento | ~78 bytes (dados do benchmark; ~110 com IDs e preços de 19 dígitos) | **41 bytes** |
+| Alocação no replay (200 mil eventos) | 44,6 MB | 9,2 MB |
+
+Em ordens de grandeza: um WAL de 10 milhões de eventos reabre em ~0,9 s (era ~8 s com o JSON otimizado e ~22 s no
+original). O arquivo fica **~1,9x a ~2,7x menor**, não mais que isso: o JSON já era enxuto com números pequenos.
+O ganho ponta a ponta (TCP, com ou sem `fsync`) ficou **dentro do ruído**: o `Append` não era o gargalo, o disco e
+o agrupamento é que mandam. O que o formato muda de verdade é o boot, o espaço e a **integridade** (cada registro tem
+CRC, o JSON só detectava texto malformado). O WAL continua sem truncamento nem snapshot, então o boot ainda cresce com a vida do sistema.
 
 ## 6. Batcher
 

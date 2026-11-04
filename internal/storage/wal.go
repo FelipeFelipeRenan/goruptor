@@ -2,15 +2,14 @@ package storage
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"os"
+	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/FelipeFelipeRenan/goruptor/internal/disruptor"
 )
@@ -18,176 +17,288 @@ import (
 // ErrWALClosed é devolvido por operações em um WAL já fechado.
 var ErrWALClosed = errors.New("wal: fechado")
 
-// WAL é o Write-Ahead Log em JSON Lines (um evento por linha).
+// WAL é o Write-Ahead Log em formato binário (ver wal_format.go): cabeçalho +
+// registros de 41 bytes com CRC32C.
 //
 // Implementa disruptor.Journal: quem o chama é o journaler do RingBuffer, de uma
 // única goroutine e em ordem de sequência. Por isso o WAL não tem mais canal nem
 // goroutine próprios: a ordem do arquivo é, por construção, a ordem do motor, e
 // o chamador decide quando fazer fsync (group commit), em vez de um timer cego.
 type WAL struct {
-	mu     sync.Mutex
-	path   string
-	file   *os.File
-	bw     *bufio.Writer
-	enc    *json.Encoder
-	closed bool
+	mu      sync.Mutex
+	path    string
+	file    *os.File
+	scratch []byte // buffer reutilizado por Append (um lote vira um único write)
+	closed  bool
 }
 
 var _ disruptor.Journal = (*WAL)(nil)
 
-// NewWAL abre (ou cria) o arquivo. Se a última escrita foi interrompida por um
-// crash e deixou uma linha truncada, a cauda inválida é removida: sem isso, os
-// próximos Append ficariam colados no lixo e o arquivo inteiro ficaria ilegível
-// a partir daquele ponto.
+// NewWAL abre (ou cria) o arquivo.
+//
+//   - arquivo novo ou vazio: grava o cabeçalho;
+//   - WAL em JSON Lines (formato antigo): é MIGRADO para o binário, e o original
+//     fica ao lado como <arquivo>.legacy-json (ver migrateLegacyJSON);
+//   - WAL binário: confere o cabeçalho e valida todos os registros. Se a última
+//     escrita foi interrompida por um crash (registro incompleto, bloco zerado,
+//     CRC inválido), a cauda é removida — sem isso os próximos Append ficariam
+//     depois do lixo e nunca seriam lidos de novo — e guardada num arquivo
+//     <arquivo>.dropped-<hora> em vez de simplesmente sumir.
 func NewWAL(filename string) (*WAL, error) {
-	file, err := os.OpenFile(filename, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o644)
+	if err := prepareFile(filename); err != nil {
+		return nil, fmt.Errorf("wal: preparando %s: %w", filename, err)
+	}
+	file, err := os.OpenFile(filename, os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
 	}
-
-	if err := repairTail(file); err != nil {
-		file.Close()
-		return nil, fmt.Errorf("wal: reparando cauda de %s: %w", filename, err)
-	}
-
-	bw := bufio.NewWriterSize(file, 64*1024)
-	return &WAL{
-		path: filename,
-		file: file,
-		bw:   bw,
-		enc:  json.NewEncoder(bw), // Encode já termina cada valor com '\n'
-	}, nil
+	return &WAL{path: filename, file: file}, nil
 }
 
-// repairTail remove bytes inválidos depois do último evento íntegro e garante
-// que o arquivo termine em '\n'.
-func repairTail(f *os.File) error {
+type fileKind int
+
+const (
+	kindNew    fileKind = iota // vazio, ou cabeçalho incompleto (crash na criação)
+	kindBinary                 // começa com o magic "GRWL"
+	kindLegacy                 // qualquer outra coisa: tratada como JSON Lines
+)
+
+func detectKind(f *os.File) (fileKind, error) {
+	var h [headerSize]byte
+	n, err := f.ReadAt(h[:], 0)
+	if err != nil && err != io.EOF {
+		return 0, err
+	}
+	switch {
+	case n == 0 || isHeaderPrefix(h[:n]):
+		return kindNew, nil
+	case n >= len(walMagic) && [4]byte(h[:4]) == walMagic:
+		return kindBinary, nil
+	default:
+		return kindLegacy, nil
+	}
+}
+
+func prepareFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	kind, err := detectKind(f)
+	if err != nil {
+		f.Close()
+		return err
+	}
+
+	switch kind {
+	case kindNew:
+		defer f.Close()
+		if err := f.Truncate(0); err != nil {
+			return err
+		}
+		h := header()
+		if _, err := f.WriteAt(h[:], 0); err != nil {
+			return err
+		}
+		// O cabeçalho precisa estar em disco antes de qualquer registro.
+		if err := f.Sync(); err != nil {
+			return err
+		}
+		return syncDir(filepath.Dir(path))
+
+	case kindLegacy:
+		f.Close()
+		return migrateLegacyJSON(path)
+
+	default:
+		defer f.Close()
+		return repairBinary(f, path)
+	}
+}
+
+// repairBinary valida o arquivo inteiro e remove a cauda inválida.
+func repairBinary(f *os.File, path string) error {
 	info, err := f.Stat()
 	if err != nil {
 		return err
 	}
 	size := info.Size()
-	if size == 0 {
+
+	good, scanErr := scanBinary(io.NewSectionReader(f, 0, size), nil)
+	if scanErr != nil && scanErr != errBadRecord && scanErr != errTornTail {
+		return scanErr // cabeçalho inválido, versão desconhecida, erro de leitura
+	}
+	if good == size {
 		return nil
 	}
 
-	_, good, _ := scan(io.NewSectionReader(f, 0, size))
-	switch {
-	case good == 0:
-		// nenhum evento íntegro: arquivo inteiro é lixo (ou só espaços)
-		log.Printf("⚠️ WAL sem eventos íntegros; descartando %d bytes", size)
-		return f.Truncate(0)
-	case size == good+1:
-		return nil // saudável: termina em '\n'
-	case size == good:
-		_, err = f.Write([]byte{'\n'}) // falta só o '\n' final
-		return err
-	default:
-		log.Printf("⚠️ WAL com cauda corrompida: removendo %d bytes após o último evento íntegro", size-good)
-		if err := f.Truncate(good); err != nil {
-			return err
-		}
-		_, err = f.Write([]byte{'\n'})
+	dropped := size - good
+	sidecar := fmt.Sprintf("%s.dropped-%d", path, time.Now().Unix())
+	if err := saveTail(f, good, size, sidecar); err != nil {
+		log.Printf("⚠️ WAL: não consegui guardar a cauda descartada em %s: %v", sidecar, err)
+	}
+	log.Printf("⚠️ WAL com cauda inválida (%v): removendo %d bytes após o último registro íntegro (cópia em %s)",
+		scanErr, dropped, sidecar)
+	if err := f.Truncate(good); err != nil {
 		return err
 	}
+	return f.Sync()
 }
 
-// scan lê eventos até o fim ou até o primeiro registro inválido.
-// Devolve os eventos, o offset logo após o último íntegro e o erro que parou a leitura (nil = EOF limpo).
+// maxSidecar limita a cópia da cauda descartada (é só para investigação).
+const maxSidecar = 16 << 20
+
+func saveTail(f *os.File, from, to int64, dst string) error {
+	if to-from > maxSidecar {
+		to = from + maxSidecar
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, io.NewSectionReader(f, from, to-from)); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// migrateLegacyJSON converte um WAL em JSON Lines para o formato binário.
 //
-// Caminho rápido: o WAL é escrito pelo próprio encoder, então quase toda linha
-// tem o formato canônico e é decodificada à mão (sem reflection nem alocação por
-// evento). Na primeira linha fora do padrão (cauda cortada, lixo, espaços, JSON
-// reformatado), a leitura continua dali com o json.Decoder, que decide o que é
-// íntegro. O resultado é idêntico ao de scanSlow (ver wal_scan_test.go).
-func scan(r io.Reader) (events []disruptor.OrderEvent, goodOffset int64, err error) {
-	br := bufio.NewReaderSize(r, 256<<10)
-	var pos int64
-	for {
-		line, rerr := br.ReadSlice('\n')
-		if rerr == nil {
-			if ev, ok := parseCanonical(line[:len(line)-1]); ok {
-				events = append(events, ev)
-				goodOffset = pos + int64(len(line)) - 1 // logo após o '}', como o Decoder
-				pos += int64(len(line))
-				continue
-			}
-		} else if len(line) == 0 && rerr == io.EOF {
-			return events, goodOffset, nil
-		}
-		// Fora do padrão (ou erro de leitura): devolve a linha ao fluxo e segue no Decoder.
-		rest := io.MultiReader(bytes.NewReader(append([]byte(nil), line...)), br)
-		return scanSlow(rest, events, pos, goodOffset)
+// Ordem das operações (cada passo é seguro se o processo cair logo depois):
+//  1. escreve o binário completo em <path>.migrating e faz fsync;
+//  2. cria o backup <path>.legacy-json como link físico do original (ou cópia, se
+//     o sistema de arquivos não suportar links);
+//  3. rename(<path>.migrating, <path>), atômico: o original só deixa de ser
+//     "o arquivo" depois de o binário estar completo e o backup existir.
+//
+// Uma queda entre os passos deixa o JSON original intacto e a migração é refeita
+// no próximo boot. Uma cauda inválida no JSON é ignorada, como sempre foi.
+func migrateLegacyJSON(path string) error {
+	src, err := os.Open(path)
+	if err != nil {
+		return err
 	}
+	events, _, scanErr := scan(src)
+	src.Close()
+	if scanErr != nil {
+		log.Printf("⚠️ WAL legado com cauda inválida; ignorando o resto na migração: %v", scanErr)
+	}
+
+	tmp := path + ".migrating"
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	bw := bufio.NewWriterSize(out, 1<<20)
+	h := header()
+	bw.Write(h[:])
+	rec := make([]byte, recordSize)
+	for i := range events {
+		putRecord(rec, &events[i])
+		bw.Write(rec)
+	}
+	if err := bw.Flush(); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+
+	backup := uniqueName(path + ".legacy-json")
+	if err := os.Link(path, backup); err != nil {
+		if err := copyFile(path, backup); err != nil {
+			return fmt.Errorf("guardando o backup do WAL legado: %w", err)
+		}
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	log.Printf("🔁 WAL migrado de JSON para binário: %d eventos (original preservado em %s)", len(events), backup)
+	return nil
 }
 
-// scanSlow é a leitura genérica com json.Decoder. base é o offset do início de r
-// no arquivo; events/good são o que já foi lido antes.
-func scanSlow(r io.Reader, events []disruptor.OrderEvent, base, good int64) ([]disruptor.OrderEvent, int64, error) {
-	dec := json.NewDecoder(r)
-	for dec.More() {
-		var ev disruptor.OrderEvent
-		if err := dec.Decode(&ev); err != nil {
-			return events, good, err
-		}
-		events = append(events, ev)
-		good = base + dec.InputOffset()
+func uniqueName(base string) string {
+	if _, err := os.Lstat(base); os.IsNotExist(err) {
+		return base
 	}
-	return events, good, nil
+	return fmt.Sprintf("%s.%d", base, time.Now().UnixNano())
 }
 
-var canonicalKeys = [6]string{
-	`{"OrderID":`, `,"AccountID":`, `,"Price":`, `,"Quantity":`, `,"AssetID":`, `,"Side":`,
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
-// parseCanonical decodifica exatamente o que json.Encoder produz para OrderEvent
-// (sem o '\n'). Qualquer desvio devolve ok=false e o chamador usa o json.Decoder.
-func parseCanonical(b []byte) (ev disruptor.OrderEvent, ok bool) {
-	var vals [6]uint64
-	for i, key := range canonicalKeys {
-		if len(b) < len(key) || string(b[:len(key)]) != key {
-			return ev, false
-		}
-		b = b[len(key):]
-		var v uint64
-		n := 0
-		for n < len(b) && b[n] >= '0' && b[n] <= '9' {
-			d := uint64(b[n] - '0')
-			if v > (math.MaxUint64-d)/10 {
-				return ev, false // estouro de uint64
-			}
-			v = v*10 + d
-			n++
-		}
-		if n == 0 || (n > 1 && b[0] == '0') { // sem dígitos ou zero à esquerda (JSON inválido)
-			return ev, false
-		}
-		vals[i] = v
-		b = b[n:]
+// syncDir faz fsync do diretório, para criações e renames sobreviverem a uma queda de energia.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
 	}
-	if len(b) != 1 || b[0] != '}' || vals[4] > math.MaxUint32 || vals[5] > math.MaxUint8 {
-		return ev, false
+	defer d.Close()
+	if err := d.Sync(); err != nil && !errors.Is(err, os.ErrInvalid) {
+		return err
 	}
-	return disruptor.OrderEvent{
-		OrderID: vals[0], AccountID: vals[1], Price: vals[2], Quantity: vals[3],
-		AssetID: uint32(vals[4]), Side: disruptor.Side(vals[5]),
-	}, true
+	return nil
+}
+
+// AdoptLegacyName renomeia o WAL do nome antigo (ex.: goruptor_journal.jsonl)
+// para o atual, se só o antigo existir. O conteúdo em JSON é migrado por NewWAL.
+func AdoptLegacyName(legacy, current string) error {
+	if _, err := os.Lstat(current); err == nil {
+		return nil // já existe um WAL no nome novo
+	}
+	if _, err := os.Lstat(legacy); err != nil {
+		return nil // nada a adotar
+	}
+	log.Printf("🔁 WAL antigo encontrado (%s): adotando como %s", legacy, current)
+	return os.Rename(legacy, current)
 }
 
 // Append grava os eventos, na ordem, e os entrega ao SO antes de retornar
 // (sobrevive a crash do processo). Para sobreviver a queda de energia use Sync.
+// O lote vira um único write.
 func (w *WAL) Append(events []disruptor.OrderEvent) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
 		return ErrWALClosed
 	}
-	for i := range events {
-		if err := w.enc.Encode(&events[i]); err != nil {
-			return err
-		}
+	need := len(events) * recordSize
+	if cap(w.scratch) < need {
+		w.scratch = make([]byte, need)
 	}
-	return w.bw.Flush()
+	b := w.scratch[:need]
+	for i := range events {
+		putRecord(b[i*recordSize:], &events[i])
+	}
+	_, err := w.file.Write(b)
+	return err
 }
 
 // Sync força o conteúdo para o armazenamento estável (fsync).
@@ -201,7 +312,7 @@ func (w *WAL) Sync() error {
 	return w.file.Sync()
 }
 
-// Close faz flush, fsync final e fecha o arquivo. É idempotente.
+// Close faz fsync final e fecha o arquivo. É idempotente.
 func (w *WAL) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -209,10 +320,9 @@ func (w *WAL) Close() error {
 		return nil
 	}
 	w.closed = true
-	flushErr := w.bw.Flush()
 	syncErr := w.file.Sync()
 	closeErr := w.file.Close()
-	return errors.Join(flushErr, syncErr, closeErr)
+	return errors.Join(syncErr, closeErr)
 }
 
 // ReadAll devolve todos os eventos íntegros do arquivo, em ordem.
@@ -221,18 +331,50 @@ func (w *WAL) ReadAll() ([]disruptor.OrderEvent, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	readFile, err := os.Open(w.path)
+	f, err := os.Open(w.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	defer readFile.Close()
+	defer f.Close()
 
-	events, _, scanErr := scan(bufio.NewReader(readFile))
-	if scanErr != nil {
-		log.Printf("⚠️ Arquivo WAL corrompido no final. Ignorando resto: %v", scanErr)
+	var events []disruptor.OrderEvent
+	if info, err := f.Stat(); err == nil && info.Size() > headerSize {
+		events = make([]disruptor.OrderEvent, 0, (info.Size()-headerSize)/recordSize)
 	}
+	_, scanErr := scanBinary(f, func(e disruptor.OrderEvent) { events = append(events, e) })
+	if scanErr != nil {
+		if scanErr == errBadRecord || scanErr == errTornTail {
+			log.Printf("⚠️ Arquivo WAL corrompido no final. Ignorando resto: %v", scanErr)
+		} else {
+			return nil, scanErr
+		}
+	}
+	return events, nil
+}
+
+// ScanFile lê um WAL SOMENTE para leitura (não repara nem migra nada), aceitando
+// o formato binário e o JSON legado. Serve para inspeção e para testes que leem o
+// arquivo enquanto o servidor o escreve; uma cauda incompleta é ignorada.
+func ScanFile(path string) ([]disruptor.OrderEvent, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var h [headerSize]byte
+	n, _ := f.ReadAt(h[:], 0)
+	if n >= len(walMagic) && [4]byte(h[:4]) == walMagic {
+		var events []disruptor.OrderEvent
+		_, err := scanBinary(f, func(e disruptor.OrderEvent) { events = append(events, e) })
+		if err != nil && err != errBadRecord && err != errTornTail {
+			return nil, err
+		}
+		return events, nil
+	}
+	events, _, _ := scan(f)
 	return events, nil
 }

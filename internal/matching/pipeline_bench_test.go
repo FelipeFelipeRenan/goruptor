@@ -93,7 +93,7 @@ func (c *countingJournal) Sync() error { c.syncs.Add(1); return c.Journal.Sync()
 // síncrono. O número de produtores (-cpu / SetParallelism) é o que alimenta o
 // group commit: mais conexões esperando = mais ordens por fsync.
 func BenchmarkPipeline_DurableAck(b *testing.B) {
-	wal, err := storage.NewWAL(filepath.Join(b.TempDir(), "bench.jsonl"))
+	wal, err := storage.NewWAL(filepath.Join(b.TempDir(), "bench.wal"))
 	if err != nil {
 		b.Fatal(err)
 	}

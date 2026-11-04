@@ -80,14 +80,24 @@ entre elas; no benchmark `BenchmarkPipeline_DurableAck` saem ~30 ordens por `fsy
 | `always` (padrão) | `fsync` do lote | crash do processo **e** queda de energia |
 | duração (`200ms`, `1s`) | `write` no SO; `fsync` no máximo a cada intervalo | crash do processo; queda de energia pode perder até o intervalo |
 
-## WAL (`internal/storage/wal.go`)
+## WAL (`internal/storage`)
 
-- Formato **JSON Lines**: um evento por linha, na ordem de sequência.
-- É o `disruptor.Journal` do anel: `Append` (entrega ao SO) e `Sync` (`fsync`). Sem goroutine nem canal próprios.
-- **Reparo de cauda**: ao abrir, se o processo caiu no meio de uma linha, o lixo depois do último evento íntegro
-  é removido e o arquivo termina em `\n`. Sem isso, os próximos appends ficariam colados no lixo.
-  Testado truncando o arquivo em **cada byte** (`TestWAL_CrashAtEveryByte`).
+- Formato **binário**, versão 1 (`wal_format.go`): cabeçalho de 8 bytes (`"GRWL"`, versão) e um registro de **41 bytes** por
+  evento, na ordem de sequência: `OrderID`, `AccountID`, `Price`, `Quantity` (u64), `AssetID` (u32), `Side` (u8) e um
+  **CRC32C** dos 37 bytes anteriores. Little-endian. O formato é fixado por um teste com bytes calculados por fora
+  (`TestFormat_GoldenRecord`): mudá-lo exige nova versão e migração.
+- É o `disruptor.Journal` do anel: `Append` (um lote vira **um** `write`, entregue ao SO) e `Sync` (`fsync`). Sem goroutine nem canal próprios.
+- **Reparo de cauda**: ao abrir, todos os registros são validados. Se o processo caiu no meio de uma escrita (registro
+  incompleto, bloco zerado, CRC inválido), tudo depois do último registro íntegro é removido, porque sem isso os próximos
+  appends ficariam depois do lixo e nunca seriam lidos. A cauda removida é **guardada** em `<arquivo>.dropped-<hora>`
+  (até 16 MB), não descartada. Vale a mesma política para corrupção no meio do arquivo: o WAL vale até o primeiro registro inválido.
+  Testado truncando o arquivo em **cada byte** (`TestWAL_CrashAtEveryByte`), com caudas ruins e corrupção no meio.
+- **Migração do JSON**: um WAL no formato antigo (JSON Lines) é convertido na primeira abertura. O binário completo é escrito
+  num `.migrating` com `fsync`, o original é preservado como `<arquivo>.legacy-json` (link físico ou cópia) e só então o
+  `rename` atômico troca os arquivos; uma queda em qualquer passo deixa o original intacto e a migração é refeita no boot
+  seguinte. O servidor adota um `goruptor_journal.jsonl` antigo como `goruptor_journal.wal`.
 - **Recuperação**: no start, `ReadAll` reprocessa o arquivo no livro (modo restauração: não reenvia trades ao SQS).
+- `storage.ScanFile` lê um WAL só para leitura (não repara nem migra), para inspeção e testes.
 
 ## Motor (`internal/matching`)
 

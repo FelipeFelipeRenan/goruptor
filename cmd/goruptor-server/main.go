@@ -43,7 +43,13 @@ func main() {
 	engineHandler := matching.NewEngineHandler(book)
 
 	// 2. INICIA O WRITE-AHEAD LOG (WAL)
-	wal, err := storage.NewWAL("goruptor_journal.jsonl")
+	// O WAL agora é binário (goruptor_journal.wal). Um goruptor_journal.jsonl antigo
+	// é adotado e migrado automaticamente (o original fica em *.legacy-json).
+	const walPath, legacyWALPath = "goruptor_journal.wal", "goruptor_journal.jsonl"
+	if err := storage.AdoptLegacyName(legacyWALPath, walPath); err != nil {
+		log.Fatalf("Falha ao adotar o WAL antigo: %v", err)
+	}
+	wal, err := storage.NewWAL(walPath)
 	if err != nil {
 		log.Fatalf("Falha ao iniciar o WAL: %v", err)
 	}

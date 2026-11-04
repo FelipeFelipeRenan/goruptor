@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -70,7 +69,7 @@ func within(t *testing.T, d time.Duration, f func()) {
 }
 
 func TestWAL_RoundTripPreservesOrder(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "wal.jsonl")
+	path := filepath.Join(t.TempDir(), "wal.wal")
 	w := mustWAL(t, path)
 
 	want := evs(1, 300)
@@ -103,7 +102,7 @@ func TestWAL_RoundTripPreservesOrder(t *testing.T) {
 // O contrato do Journal diz que Append sobrevive a crash do PROCESSO: depois
 // dele os bytes já estão no SO, visíveis para outro leitor, sem precisar de Sync.
 func TestWAL_AppendReachesOSWithoutSync(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "wal.jsonl")
+	path := filepath.Join(t.TempDir(), "wal.wal")
 	w := mustWAL(t, path)
 	defer w.Close()
 
@@ -114,8 +113,8 @@ func TestWAL_AppendReachesOSWithoutSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := bytes.Count(raw, []byte("\n")); n != 10 {
-		t.Fatalf("esperava 10 linhas no arquivo logo após Append, achei %d", n)
+	if want := headerSize + 10*recordSize; len(raw) != want {
+		t.Fatalf("esperava %d bytes no arquivo logo após Append, achei %d", want, len(raw))
 	}
 }
 
@@ -124,35 +123,35 @@ func TestWAL_AppendReachesOSWithoutSync(t *testing.T) {
 //   - a recuperação tem que devolver exatamente os eventos completos dentro de k bytes
 //     (um prefixo íntegro do que foi escrito, nunca lixo, nunca evento a mais);
 //   - novos Append depois da recuperação têm que continuar legíveis.
-//
-// Antes, uma linha truncada deixava os appends seguintes colados no lixo e o
-// arquivo ficava ilegível dali em diante.
 func TestWAL_CrashAtEveryByte(t *testing.T) {
 	quietLogs(t)
 	dir := t.TempDir()
 	full := evs(1, 12)
 
-	// Gera o arquivo completo e descobre onde termina cada evento (antes do '\n').
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	var ends []int // ends[i] = tamanho do arquivo necessário para o evento i estar íntegro
-	for i := range full {
-		enc.Encode(&full[i])
-		ends = append(ends, buf.Len()-1) // sem o '\n'
+	src := filepath.Join(dir, "src.wal")
+	w := mustWAL(t, src)
+	w.Append(full)
+	w.Close()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
 	}
-	data := buf.Bytes()
+	if len(data) != headerSize+12*recordSize {
+		t.Fatalf("tamanho inesperado: %d", len(data))
+	}
 
 	extra := disruptor.OrderEvent{OrderID: 999, Price: 5, Quantity: 5, Side: disruptor.Sell}
 
 	for k := 0; k <= len(data); k++ {
-		path := filepath.Join(dir, "wal.jsonl")
+		path := filepath.Join(dir, "wal.wal")
+		os.Remove(path)
 		if err := os.WriteFile(path, data[:k], 0o644); err != nil {
 			t.Fatal(err)
 		}
 
 		var want []disruptor.OrderEvent
-		for i, end := range ends {
-			if end <= k {
+		for i := range full {
+			if headerSize+(i+1)*recordSize <= k {
 				want = append(want, full[i])
 			}
 		}
@@ -165,70 +164,91 @@ func TestWAL_CrashAtEveryByte(t *testing.T) {
 		if !equalEvents(got, want) {
 			t.Fatalf("k=%d: recuperou %d eventos, esperava %d", k, len(got), len(want))
 		}
-
 		if err := w.Append([]disruptor.OrderEvent{extra}); err != nil {
 			t.Fatalf("k=%d: Append: %v", k, err)
 		}
 		w.Close()
 
-		// Reabre: tem que ser prefixo + o evento novo, e o arquivo todo tem que ser JSON Lines válido.
+		// Reabre: tem que ser prefixo + o evento novo, e o arquivo reparado tem tamanho exato.
 		w2 := mustWAL(t, path)
 		got, _ = w2.ReadAll()
 		w2.Close()
 		if !equalEvents(got, append(append([]disruptor.OrderEvent(nil), want...), extra)) {
 			t.Fatalf("k=%d: após Append+reabrir veio %d eventos, esperava %d", k, len(got), len(want)+1)
 		}
-		raw, _ := os.ReadFile(path)
-		for _, line := range bytes.Split(bytes.TrimSuffix(raw, []byte("\n")), []byte("\n")) {
-			var e disruptor.OrderEvent
-			if err := json.Unmarshal(line, &e); err != nil {
-				t.Fatalf("k=%d: linha inválida no arquivo reparado: %q", k, line)
-			}
+		if info, _ := os.Stat(path); info.Size() != int64(headerSize+(len(want)+1)*recordSize) {
+			t.Fatalf("k=%d: arquivo reparado com %d bytes", k, info.Size())
 		}
 	}
 }
 
+// Caudas ruins de vários tipos: a recuperação mantém os 5 eventos íntegros,
+// descarta o resto (guardando a cauda ao lado) e os Append seguintes funcionam.
 func TestWAL_GarbageTails(t *testing.T) {
 	quietLogs(t)
-	cases := map[string]string{
-		"lixo binário":       "\x00\x01\x02garbage",
-		"json truncado":      `{"OrderID":77,"Pri`,
-		"linhas em branco":   "\n\n\n",
-		"tipo errado":        `{"OrderID":"abc"}`,
-		"json válido + lixo": `{"OrderID":1,"Price":1,"Quantity":1,"Side":0} xyz`,
-		"texto solto":        "isto não é um WAL",
+
+	validRec := func() []byte {
+		b := make([]byte, recordSize)
+		e := evs(500, 1)[0]
+		putRecord(b, &e)
+		return b
+	}
+	badCRC := validRec()
+	badCRC[40] ^= 0xFF
+	bitflip := validRec()
+	bitflip[3] ^= 0x01 // dado alterado, CRC antigo
+
+	cases := map[string][]byte{
+		"lixo curto":                []byte("\x00\x01\x02garbage"),
+		"meio registro":             validRec()[:20],
+		"registro menos 1 byte":     validRec()[:recordSize-1],
+		"bloco de zeros (4 KiB)":    make([]byte, 4096),
+		"CRC inválido":              badCRC,
+		"bit invertido":             bitflip,
+		"texto solto":               []byte("isto não é um WAL, mas tem mais de 41 bytes de comprimento mesmo"),
+		"registro válido após lixo": append([]byte("lixo"), validRec()...),
 	}
 	for name, tail := range cases {
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "wal.jsonl")
+			path := filepath.Join(t.TempDir(), "wal.wal")
 			w := mustWAL(t, path)
 			want := evs(1, 5)
 			w.Append(want)
 			w.Close()
 
 			f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-			f.WriteString(tail)
+			f.Write(tail)
 			f.Close()
 
 			w2 := mustWAL(t, path)
 			defer w2.Close()
 			got, _ := w2.ReadAll()
-			// "json válido + lixo" começa com um evento íntegro (OrderID 1) colado ao lixo.
-			if name == "json válido + lixo" {
-				want = append(want, disruptor.OrderEvent{OrderID: 1, Price: 1, Quantity: 1, Side: 0})
-			}
 			if !equalEvents(got, want) {
 				t.Fatalf("recuperou %d eventos, esperava %d", len(got), len(want))
 			}
+			if info, _ := os.Stat(path); info.Size() != int64(headerSize+5*recordSize) {
+				t.Fatalf("arquivo não foi truncado para o último registro íntegro: %d bytes", info.Size())
+			}
 			if err := w2.Append(evs(100, 1)); err != nil {
 				t.Fatal(err)
+			}
+			got, _ = w2.ReadAll()
+			if len(got) != 6 || got[5].OrderID != 100 {
+				t.Fatalf("Append após reparo não ficou legível: %d eventos", len(got))
+			}
+			side, _ := filepath.Glob(path + ".dropped-*")
+			if len(side) != 1 {
+				t.Fatalf("a cauda descartada deveria ter sido guardada ao lado (achei %d arquivos)", len(side))
+			}
+			if b, _ := os.ReadFile(side[0]); !bytes.Equal(b, tail) {
+				t.Fatalf("a cópia da cauda difere do que foi descartado")
 			}
 		})
 	}
 }
 
 func TestWAL_ClosedRejectsAndCloseIsIdempotent(t *testing.T) {
-	w := mustWAL(t, filepath.Join(t.TempDir(), "wal.jsonl"))
+	w := mustWAL(t, filepath.Join(t.TempDir(), "wal.wal"))
 	w.Append(evs(1, 3))
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
@@ -248,7 +268,7 @@ func TestWAL_ClosedRejectsAndCloseIsIdempotent(t *testing.T) {
 // `return` com o mutex ainda travado, e a goroutine morria. Todo Log/ReadAll
 // seguinte travava para sempre. Agora um erro de Sync não pode deixar lock preso.
 func TestWAL_SyncErrorDoesNotLeakLock(t *testing.T) {
-	w := mustWAL(t, filepath.Join(t.TempDir(), "wal.jsonl"))
+	w := mustWAL(t, filepath.Join(t.TempDir(), "wal.wal"))
 	w.Append(evs(1, 3))
 
 	w.file.Close() // sabota o descritor: o próximo Sync falha
@@ -268,7 +288,7 @@ func TestWAL_SyncErrorDoesNotLeakLock(t *testing.T) {
 }
 
 func TestWAL_ReadAllOnMissingFile(t *testing.T) {
-	w := mustWAL(t, filepath.Join(t.TempDir(), "wal.jsonl"))
+	w := mustWAL(t, filepath.Join(t.TempDir(), "wal.wal"))
 	defer w.Close()
 	os.Remove(w.path)
 	got, err := w.ReadAll()

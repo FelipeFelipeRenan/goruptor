@@ -61,7 +61,7 @@ func newStack(t testing.TB) *stack {
 
 func newStackWith(t testing.TB, jopts disruptor.JournalOptions) *stack {
 	t.Helper()
-	s := &stack{walPath: filepath.Join(t.TempDir(), "journal.jsonl")}
+	s := &stack{walPath: filepath.Join(t.TempDir(), "journal.wal")}
 
 	var err error
 	if s.wal, err = storage.NewWAL(s.walPath); err != nil {
